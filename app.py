@@ -1,12 +1,7 @@
-import asyncio
 import configparser
 import logging
-from datetime import date
-from typing import List, Optional
 
-from pyrogram import Client, filters
-from pyrogram.types import Message, ForumTopic, PollOption
-
+from src.auto_poll_voter_bot import AutoPollVoterBot
 from src.event_info_parser import EventInfoParser
 
 # ---------- Logging ----------
@@ -25,143 +20,33 @@ API_HASH = cfg["pyrogram"]["api_hash"]
 SESSION_NAME = cfg["pyrogram"].get("session_name", "user")
 TARGET_CHAT = int(cfg["group"]["chat_id"])
 VOTE_OPTION = cfg["group"]["vote_option"]
-ALLOWED_EVENT_TYPES = [event_type.strip().lower() for event_type in cfg["event"]["type"].split(",") if
-                       event_type.strip()]
-ALLOWED_EVENT_DAYS = [day.strip().lower() for day in cfg["event"]["days"].split(",") if day.strip()]
-
-# ---------- App ----------
-app = Client(
-    name=SESSION_NAME,
-    api_id=API_ID,
-    api_hash=API_HASH,
-    workdir="."
-)
-event_info_parser = EventInfoParser()
-
-# ---------- Your business rules ----------
-def topic_name_matches(name: str) -> bool:
-    """
-    Accept topic names that:
-      - parse into a valid EventInfo,
-      - have event_type allowed by [event] section in config.ini,
-      - have weekday allowed by [event] section (if configured),
-      - and have event_date in the future (strictly greater than today).
-    """
-    try:
-        event_info = event_info_parser.parse_line(name)
-    except Exception as exc:
-        log.warning("Topic name didn't parse as event info: %r -> %s", name, exc)
-        return False
-
-    # Check date is in the future
-    if event_info.event_date <= date.today():
-        log.info("Topic '%s' is in past; skipping.", name)
-        return False
-
-    # Check event type
-    if ALLOWED_EVENT_TYPES and event_info.event_type.strip().lower() not in ALLOWED_EVENT_TYPES:
-        log.info("Topic '%s' has another event_type; skipping.", name)
-        return False
-
-    # Check weekday
-    if ALLOWED_EVENT_DAYS and event_info.weekday.strip().lower() not in ALLOWED_EVENT_DAYS:
-        log.info("Topic '%s' is for another day; skipping.", name)
-        return False
-
-    return True
+ALLOWED_EVENT_TYPES = [
+    event_type.strip().lower()
+    for event_type in cfg["event"]["type"].split(",")
+    if event_type.strip()
+]
+ALLOWED_EVENT_DAYS = [
+    day.strip().lower()
+    for day in cfg["event"]["days"].split(",")
+    if day.strip()
+]
 
 
-def choose_option(options: List[PollOption]) -> Optional[int]:
-    """
-    Decide which option to vote for.
-    """
-    for i, option in enumerate(options):
-        if VOTE_OPTION.lower() in (option.text or "").lower():
-            return i
-    # fallback: pick the first option
-    return 0 if options else None
-
-
-async def get_topic_name(chat_id, thread_id) -> Optional[str]:
-    """
-    Fetch the forum topic by thread_id to read its name.
-    """
-    try:
-        topic: ForumTopic = await app.get_forum_topic(chat_id, thread_id)
-        return topic.name
-    except Exception as e:
-        log.warning("Could not fetch topic name for thread %s: %s", thread_id, e)
-        return None
-
-
-async def vote_in_thread_poll(message: Message) -> None:
-    """
-    Find the first message in the thread, ensure it's a poll, then vote.
-    """
-    if not message.chat or not message.message_thread_id:
-        return
-
-    # 1) Read the topic name and enforce your conditions
-    topic_name = await get_topic_name(message.chat.id, message.message_thread_id)
-    if not topic_name:
-        log.info("Skipping; unknown topic name (thread %s).", message.message_thread_id)
-        return
-
-    if not topic_name_matches(topic_name):
-        return
-
-    log.info("Topic matched: '%s' (thread %s).", topic_name, message.message_thread_id)
-
-    # 2) Decide which option(s) to vote for
-    options = message.poll.options or []
-    choice_indices = choose_option(options)
-    if choice_indices is None:
-        log.warning("No choice indices computed; skipping vote.")
-        return
-
-    # 3) Vote (wait 5 seconds before sending the vote request)
-    try:
-        await asyncio.sleep(5)
-        await app.vote_poll(message.chat.id, message.id, choice_indices)
-        log.info(
-            "Voted in poll (message %s) with options %s in topic '%s'.",
-            message.id, choice_indices, topic_name
-        )
-    except Exception as e:
-        log.error("Voting failed on poll %s: %s", message.id, e)
-
-
-def forum_filter(_, __, message: Message) -> bool:
-    # True if the message belongs to a topic (forum thread)
-    return bool(getattr(message, "is_topic_message", False))
-
-
-# ---------- Event handlers ----------
-# We only care about messages in the target group, and only those that belong to a forum topic.
-@app.on_message(filters.chat(TARGET_CHAT) & filters.create(forum_filter) & filters.poll)
-async def on_forum_message(_, message: Message):
-    """
-    Triggered for every new message in the specified forum-enabled chat.
-    """
-    try:
-        await vote_in_thread_poll(message)
-    except Exception as e:
-        log.exception("Handler crashed: %s", e)
+def create_bot() -> AutoPollVoterBot:
+    event_info_parser = EventInfoParser()
+    return AutoPollVoterBot(
+        api_id=API_ID,
+        api_hash=API_HASH,
+        session_name=SESSION_NAME,
+        target_chat=TARGET_CHAT,
+        vote_option=VOTE_OPTION,
+        allowed_event_types=ALLOWED_EVENT_TYPES,
+        allowed_event_days=ALLOWED_EVENT_DAYS,
+        event_info_parser=event_info_parser,
+        workdir=".",
+    )
 
 
 if __name__ == "__main__":
-    # Run the client
-    app.run()
-
-# async def main():
-#     async with app:
-#         async for dialog in app.get_dialogs():
-#             chat = dialog.chat
-#             print(f"{chat.id:<15}  {chat.type:<10}  {chat.title or chat.first_name or ''}")
-#
-# if __name__ == '__main__':
-#     app.start()
-#     for dialog in app.get_dialogs():
-#         chat = dialog.chat
-#         print(f"{chat.id:<15}  {chat.type:<10}  {chat.title or chat.first_name or ''}")
-#     app.stop()
+    bot = create_bot()
+    bot.run()
