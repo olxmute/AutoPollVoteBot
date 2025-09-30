@@ -1,10 +1,13 @@
 import asyncio
 import configparser
 import logging
+from datetime import date
 from typing import List, Optional
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, ForumTopic, PollOption
+
+from src.event_info_parser import EventInfoParser
 
 # ---------- Logging ----------
 logging.basicConfig(
@@ -22,6 +25,9 @@ API_HASH = cfg["pyrogram"]["api_hash"]
 SESSION_NAME = cfg["pyrogram"].get("session_name", "user")
 TARGET_CHAT = int(cfg["group"]["chat_id"])
 VOTE_OPTION = cfg["group"]["vote_option"]
+ALLOWED_EVENT_TYPES = [event_type.strip().lower() for event_type in cfg["event"]["type"].split(",") if
+                       event_type.strip()]
+ALLOWED_EVENT_DAYS = [day.strip().lower() for day in cfg["event"]["days"].split(",") if day.strip()]
 
 # ---------- App ----------
 app = Client(
@@ -30,14 +36,38 @@ app = Client(
     api_hash=API_HASH,
     workdir="."
 )
-
+event_info_parser = EventInfoParser()
 
 # ---------- Your business rules ----------
 def topic_name_matches(name: str) -> bool:
     """
-    TODO: Replace this with your real conditions.
-    Example: accept topics whose name starts with 'Vote: ' and contains 'Round 1'
+    Accept topic names that:
+      - parse into a valid EventInfo,
+      - have event_type allowed by [event] section in config.ini,
+      - have weekday allowed by [event] section (if configured),
+      - and have event_date in the future (strictly greater than today).
     """
+    try:
+        event_info = event_info_parser.parse_line(name)
+    except Exception as exc:
+        log.warning("Topic name didn't parse as event info: %r -> %s", name, exc)
+        return False
+
+    # Check date is in the future
+    if event_info.event_date <= date.today():
+        log.info("Topic '%s' is in past; skipping.", name)
+        return False
+
+    # Check event type
+    if ALLOWED_EVENT_TYPES and event_info.event_type.strip().lower() not in ALLOWED_EVENT_TYPES:
+        log.info("Topic '%s' has another event_type; skipping.", name)
+        return False
+
+    # Check weekday
+    if ALLOWED_EVENT_DAYS and event_info.weekday.strip().lower() not in ALLOWED_EVENT_DAYS:
+        log.info("Topic '%s' is for another day; skipping.", name)
+        return False
+
     return True
 
 
@@ -78,7 +108,6 @@ async def vote_in_thread_poll(message: Message) -> None:
         return
 
     if not topic_name_matches(topic_name):
-        log.info("Topic '%s' doesn't match rules; skipping.", topic_name)
         return
 
     log.info("Topic matched: '%s' (thread %s).", topic_name, message.message_thread_id)
@@ -111,7 +140,6 @@ def forum_filter(_, __, message: Message) -> bool:
 # We only care about messages in the target group, and only those that belong to a forum topic.
 @app.on_message(filters.chat(TARGET_CHAT) & filters.create(forum_filter) & filters.poll)
 async def on_forum_message(_, message: Message):
-    print(f"handled message: ${str(message)}")
     """
     Triggered for every new message in the specified forum-enabled chat.
     """
