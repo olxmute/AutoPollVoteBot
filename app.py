@@ -1,4 +1,3 @@
-# app.py
 import asyncio
 import configparser
 import logging
@@ -6,7 +5,6 @@ from typing import List, Optional
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, ForumTopic, PollOption
-
 
 # ---------- Logging ----------
 logging.basicConfig(
@@ -32,6 +30,7 @@ app = Client(
     api_hash=API_HASH,
     workdir="."
 )
+
 
 # ---------- Your business rules ----------
 def topic_name_matches(name: str) -> bool:
@@ -91,8 +90,9 @@ async def vote_in_thread_poll(message: Message) -> None:
         log.warning("No choice indices computed; skipping vote.")
         return
 
-    # 3) Vote
+    # 3) Vote (wait 5 seconds before sending the vote request)
     try:
+        await asyncio.sleep(5)
         await app.vote_poll(message.chat.id, message.id, choice_indices)
         log.info(
             "Voted in poll (message %s) with options %s in topic '%s'.",
@@ -105,6 +105,7 @@ async def vote_in_thread_poll(message: Message) -> None:
 def forum_filter(_, __, message: Message) -> bool:
     # True if the message belongs to a topic (forum thread)
     return bool(getattr(message, "is_topic_message", False))
+
 
 # ---------- Event handlers ----------
 # We only care about messages in the target group, and only those that belong to a forum topic.
@@ -123,7 +124,6 @@ async def on_forum_message(_, message: Message):
 if __name__ == "__main__":
     # Run the client
     app.run()
-
 
 # async def main():
 #     async with app:
