@@ -26,7 +26,7 @@ class EventInfoParser:
 
         event_type = match.group("event_type").strip()
         event_date = datetime.strptime(match.group("event_date"), "%Y-%m-%d").date()
-        weekday = match.group("weekday")
+        weekday = match.group("weekday").strip()
 
         time_range = match.group("time_range")
         time_parts = self._TIME_RANGE_SPLIT.split(time_range, maxsplit=1)

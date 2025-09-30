@@ -7,37 +7,30 @@ from pyrogram import Client, filters
 from pyrogram.handlers import MessageHandler
 from pyrogram.types import Message, ForumTopic, PollOption
 
+from src.config import AppConfig
+
 log = logging.getLogger("forum-poll-voter")
 
 
 class AutoPollVoterBot:
     def __init__(
             self,
-            api_id: int,
-            api_hash: str,
-            session_name: str,
-            target_chat: int,
-            vote_option: str,
-            allowed_event_types: list[str],
-            allowed_event_days: list[str],
+            config: AppConfig,
             event_info_parser,
             workdir: str = ".",
     ):
+        self.config = config
         self.app = Client(
-            name=session_name,
-            api_id=api_id,
-            api_hash=api_hash,
+            name=config.pyrogram.session_name,
+            api_id=config.pyrogram.api_id,
+            api_hash=config.pyrogram.api_hash,
             workdir=workdir,
         )
         self.event_info_parser = event_info_parser
-        self.target_chat = target_chat
-        self.vote_option = vote_option
-        self.allowed_event_types = [et.strip().lower() for et in allowed_event_types if et.strip()]
-        self.allowed_event_days = [d.strip().lower() for d in allowed_event_days if d.strip()]
         self._register_handlers()
 
     def _register_handlers(self) -> None:
-        chat_filter = filters.chat(self.target_chat)
+        chat_filter = filters.chat(self.config.group.chat_id)
         forum_filter = filters.create(self.forum_filter)
         poll_filter = filters.poll
         self.app.add_handler(
@@ -57,8 +50,7 @@ class AutoPollVoterBot:
         Accept topic names that:
           - parse into a valid EventInfo,
           - have event_date in the future (strictly greater than today).
-          - have event_type allowed by config,
-          - have weekday allowed by config (if configured),
+          - match at least one scheduled event (type, day, and optionally start_time).
         """
         try:
             event_info = self.event_info_parser.parse_line(name)
@@ -71,24 +63,34 @@ class AutoPollVoterBot:
             log.info("Topic '%s' is in past; skipping.", name)
             return False
 
-        # Check event type
-        if self.allowed_event_types and event_info.event_type.strip().lower() not in self.allowed_event_types:
-            log.info("Topic '%s' has another event_type; skipping.", name)
-            return False
+        # Check if event matches any scheduled event
+        event_type = event_info.event_type.lower()
+        weekday = event_info.weekday.lower()
 
-        # Check weekday
-        if self.allowed_event_days and event_info.weekday.strip().lower() not in self.allowed_event_days:
-            log.info("Topic '%s' is for another day; skipping.", name)
-            return False
+        for scheduled in self.config.event.schedule:
+            if scheduled.type.lower() == event_type and scheduled.day.lower() == weekday:
+                # If start_time is configured, it must match
+                if scheduled.start_time is not None:
+                    if event_info.start_time != scheduled.start_time:
+                        log.info(
+                            "Topic '%s' matches type and day but start_time differs (expected %s, got %s); skipping.",
+                            name, scheduled.start_time, event_info.start_time
+                        )
+                        continue
 
-        return True
+                log.info("Topic '%s' matches schedule (type=%s, day=%s, start_time=%s).",
+                         name, scheduled.type, scheduled.day, scheduled.start_time or "any")
+                return True
+
+        log.info("Topic '%s' doesn't match any scheduled event; skipping.", name)
+        return False
 
     def choose_option(self, options: List[PollOption]) -> Optional[int]:
         """
         Decide which option to vote for.
         """
         for i, option in enumerate(options):
-            if self.vote_option.lower() in (option.text or "").lower():
+            if self.config.group.vote_option.lower() in (option.text or "").lower():
                 return i
         # fallback: pick the first option
         return 0 if options else None
