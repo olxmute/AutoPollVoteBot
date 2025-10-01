@@ -9,3 +9,7 @@ group:
 
 event:
   schedule: {{ env.EVENT_SCHEDULE | parse_schedule_dsl | tojson }}
+
+server:
+  port: {{ env.PORT | default(8080) | int }}
+  ping_url: {{ env.PING_URL }}
