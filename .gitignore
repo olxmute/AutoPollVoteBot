@@ -1,3 +1,6 @@
 *.iml
 .idea
 .venv
+.env
+config.yaml
+*.session

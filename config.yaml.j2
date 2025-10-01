@@ -1,0 +1,19 @@
+pyrogram:
+  api_id: {{ env.PYROGRAM_API_ID | int }}
+  api_hash: "{{ env.PYROGRAM_API_HASH }}"
+  session_name: {{ env.SESSION_NAME | default("user_session") }}
+
+group:
+  chat_id: {{ env.GROUP_CHAT_ID | int }}
+  vote_option: "{{ env.GROUP_VOTE_OPTION | default("Go!") }}"
+
+event:
+  schedule:
+    - type: Game
+      day: wed
+      start_time: "20:30"
+    - type: Game
+      day: sat
+      start_time: "11:00"
+    - type: Game
+      day: sun

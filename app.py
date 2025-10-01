@@ -1,7 +1,7 @@
 import logging
 
 from src.auto_poll_voter_bot import AutoPollVoterBot
-from src.config import load_config
+from src.config import load_config_from_template
 from src.event_info_parser import EventInfoParser
 
 # ---------- Logging ----------
@@ -13,7 +13,7 @@ log = logging.getLogger("forum-poll-voter")
 
 
 def create_bot() -> AutoPollVoterBot:
-    config = load_config()
+    config = load_config_from_template("config.yaml.j2")
     event_info_parser = EventInfoParser()
     return AutoPollVoterBot(
         config=config,
