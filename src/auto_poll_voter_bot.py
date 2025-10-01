@@ -134,6 +134,7 @@ class AutoPollVoterBot:
         # 3) Vote (wait 5 seconds before sending the vote request)
         try:
             await asyncio.sleep(5)
+            # skip voting if already voted
             await self.app.vote_poll(message.chat.id, message.id, choice_index)
             log.info(
                 "Voted in poll (message %s) with options %s in topic '%s'.",

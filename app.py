@@ -12,16 +12,9 @@ logging.basicConfig(
 log = logging.getLogger("forum-poll-voter")
 
 
-def create_bot() -> AutoPollVoterBot:
+if __name__ == "__main__":
     config = load_config_from_template("config.yaml.j2")
     event_info_parser = EventInfoParser()
-    return AutoPollVoterBot(
-        config=config,
-        event_info_parser=event_info_parser,
-        workdir=".",
-    )
+    bot = AutoPollVoterBot(config=config, event_info_parser=event_info_parser)
 
-
-if __name__ == "__main__":
-    bot = create_bot()
     bot.run()
