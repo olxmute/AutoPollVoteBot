@@ -53,7 +53,8 @@ GROUP_VOTE_OPTION=Go!
 # Event schedule (DSL format)
 EVENT_SCHEDULE=your_schedule_here
 
-# Optional: Health check port (default: 8080)
+# Server settings
+PING_URL=http://localhost:8080 # or your server URL
 PORT=8080
 ```
 
