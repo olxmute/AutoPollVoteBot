@@ -8,12 +8,4 @@ group:
   vote_option: "{{ env.GROUP_VOTE_OPTION | default("Go!") }}"
 
 event:
-  schedule:
-    - type: Game
-      day: wed
-      start_time: "20:30"
-    - type: Game
-      day: sat
-      start_time: "11:00"
-    - type: Game
-      day: sun
+  schedule: {{ env.EVENT_SCHEDULE | parse_schedule_dsl | tojson }}
