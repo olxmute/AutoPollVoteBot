@@ -1,4 +1,5 @@
 import logging
+import os
 
 from src.auto_poll_voter_bot import AutoPollVoterBot
 from src.config import load_config_from_template
@@ -17,7 +18,8 @@ log = logging.getLogger("forum-poll-voter")
 
 if __name__ == "__main__":
     # Start health check server
-    health_server = HealthCheckServer(port=8080)
+    health_port = int(os.getenv('PORT', '8080'))
+    health_server = HealthCheckServer(port=health_port)
     health_server.start()
 
     config = load_config_from_template("config.yaml.j2")

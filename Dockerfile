@@ -14,8 +14,11 @@ COPY config.yaml.j2 .
 COPY my_user_session.session .
 COPY src/ ./src/
 
+# Set default port
+ENV PORT=8080
+
 # Expose health check port
-EXPOSE 8080
+EXPOSE ${PORT}
 
 # Run the application
 CMD ["python", "app.py"]
