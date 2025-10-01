@@ -14,5 +14,8 @@ COPY config.yaml.j2 .
 COPY my_user_session.session .
 COPY src/ ./src/
 
+# Expose health check port
+EXPOSE 8080
+
 # Run the application
 CMD ["python", "app.py"]
