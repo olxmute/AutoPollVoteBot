@@ -108,7 +108,7 @@ class AutoPollVoterBot:
 
     async def vote_in_thread_poll(self, message: Message) -> None:
         """
-        Find the first message in the thread, ensure it's a poll, then vote.
+        Ensure the message is a poll, then vote if not voted yet.
         """
         if not message.chat or not message.message_thread_id:
             return
@@ -124,17 +124,21 @@ class AutoPollVoterBot:
 
         log.info("Topic matched: '%s' (thread %s).", topic_name, message.message_thread_id)
 
-        # 2) Decide which option(s) to vote for
+        # 2) Skip voting if already voted
+        if message.poll.chosen_option_id is not None:
+            log.info("Already voted; skipping vote.")
+            return
+
+        # 3) Decide which option(s) to vote for
         options = message.poll.options or []
         choice_index = self.choose_option(options)
         if choice_index is None:
             log.warning("No choice indices computed; skipping vote.")
             return
 
-        # 3) Vote (wait 5 seconds before sending the vote request)
+        # 4) Vote (wait 5 seconds before sending the vote request)
         try:
             await asyncio.sleep(5)
-            # skip voting if already voted
             await self.app.vote_poll(message.chat.id, message.id, choice_index)
             log.info(
                 "Voted in poll (message %s) with options %s in topic '%s'.",
