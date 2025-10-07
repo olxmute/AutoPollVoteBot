@@ -11,6 +11,8 @@ from src.config import AppConfig
 
 log = logging.getLogger("forum-poll-voter")
 
+SAVED_MESSAGES_CHAT = "me"
+
 
 class AutoPollVoterBot:
     def __init__(
@@ -33,6 +35,7 @@ class AutoPollVoterBot:
         chat_filter = filters.chat(self.config.group.chat_id)
         forum_filter = filters.create(self.forum_filter)
         poll_filter = filters.poll
+        self.app.add_handler(MessageHandler(self.log_incoming_message, filters.chat(SAVED_MESSAGES_CHAT)))
         self.app.add_handler(
             MessageHandler(
                 self.on_forum_message,
@@ -157,6 +160,13 @@ class AutoPollVoterBot:
             await self.vote_in_thread_poll(message)
         except Exception as e:
             log.exception("Handler crashed: %s", e)
+
+    async def log_incoming_message(self, client, message: Message) -> None:
+        """Log "/ping" messages arriving in Saved Messages"""
+        if message.text and message.text.strip() == "/ping":
+            chat_id = getattr(message.chat, "id", None) if message.chat else None
+            log.info("Received /ping in Saved Messages (%s)", chat_id)
+            await client.send_message(SAVED_MESSAGES_CHAT, "pong")
 
     def run(self) -> None:
         # Run the client
