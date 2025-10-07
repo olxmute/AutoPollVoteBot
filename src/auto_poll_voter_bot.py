@@ -136,9 +136,9 @@ class AutoPollVoterBot:
             log.warning("No choice indices computed; skipping vote.")
             return
 
-        # 4) Vote (wait 5 seconds before sending the vote request)
+        # 4) Vote (wait for configured delay before sending the vote request)
         try:
-            await asyncio.sleep(5)
+            await asyncio.sleep(self.config.group.vote_delay_seconds)
             await self.app.vote_poll(message.chat.id, message.id, choice_index)
             log.info(
                 "Voted in poll (message %s) with options %s in topic '%s'.",

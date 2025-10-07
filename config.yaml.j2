@@ -6,6 +6,7 @@ pyrogram:
 group:
   chat_id: {{ env.GROUP_CHAT_ID | int }}
   vote_option: "{{ env.GROUP_VOTE_OPTION | default("Go!") }}"
+  vote_delay_seconds: {{ env.VOTE_DELAY_SECONDS | default(5) | int }}
 
 event:
   schedule: {{ env.EVENT_SCHEDULE | parse_schedule_dsl | tojson }}

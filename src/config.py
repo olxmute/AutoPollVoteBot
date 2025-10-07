@@ -18,6 +18,7 @@ class PyrogramConfig:
 class GroupConfig:
     chat_id: int
     vote_option: str
+    vote_delay_seconds: int
 
 
 @dataclass
