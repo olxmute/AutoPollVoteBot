@@ -20,6 +20,7 @@ class AutoPollVoterBot:
             config: AppConfig,
             event_info_parser,
             workdir: str = ".",
+            health_server=None,
     ):
         self.config = config
         self.app = Client(
@@ -29,6 +30,7 @@ class AutoPollVoterBot:
             workdir=workdir,
         )
         self.event_info_parser = event_info_parser
+        self.health_server = health_server
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -169,5 +171,9 @@ class AutoPollVoterBot:
             await client.send_message(SAVED_MESSAGES_CHAT, "pong")
 
     def run(self) -> None:
+        # Register client with health server if available
+        if self.health_server:
+            self.health_server.set_bot_client(self.app)
+
         # Run the client
         self.app.run()

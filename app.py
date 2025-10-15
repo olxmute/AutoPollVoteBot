@@ -23,7 +23,7 @@ if __name__ == "__main__":
     health_server.start()
 
     event_info_parser = EventInfoParser()
-    bot = AutoPollVoterBot(config=config, event_info_parser=event_info_parser)
+    bot = AutoPollVoterBot(config=config, event_info_parser=event_info_parser, health_server=health_server)
 
     try:
         health_server.set_status(True, "Bot running")

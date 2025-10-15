@@ -49,6 +49,7 @@ SESSION_NAME=my_user_session
 # Group settings
 GROUP_CHAT_ID=your_chat_id
 GROUP_VOTE_OPTION=Go!
+VOTE_DELAY_SECONDS=5
 
 # Event schedule (DSL format)
 EVENT_SCHEDULE=your_schedule_here
@@ -57,6 +58,20 @@ EVENT_SCHEDULE=your_schedule_here
 PING_URL=http://localhost:8080 # or your server URL
 PORT=8080
 ```
+
+### Environment Variables
+
+| Variable             | Required | Default        | Description                                        |
+|----------------------|----------|----------------|----------------------------------------------------|
+| `PYROGRAM_API_ID`    | Yes      | -              | Telegram API ID (get from https://my.telegram.org) |
+| `PYROGRAM_API_HASH`  | Yes      | -              | Telegram API Hash                                  |
+| `SESSION_NAME`       | No       | `user_session` | Name of the Pyrogram session file                  |
+| `GROUP_CHAT_ID`      | Yes      | -              | Chat ID of the forum/group to monitor              |
+| `GROUP_VOTE_OPTION`  | No       | `Go!`          | Text of the poll option to vote for                |
+| `VOTE_DELAY_SECONDS` | No       | `5`            | Delay in seconds before casting the vote           |
+| `EVENT_SCHEDULE`     | Yes      | -              | Schedule DSL string (see below)                    |
+| `PORT`               | No       | `8080`         | Port for the health check server                   |
+| `PING_URL`           | Yes      | -              | URL for self-ping health checks                    |
 
 ### Schedule Configuration
 

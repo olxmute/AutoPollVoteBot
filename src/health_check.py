@@ -1,12 +1,15 @@
 import logging
 import threading
 import time
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import requests
 from flask import Flask, jsonify
 
 from src.config import AppConfig
+
+if TYPE_CHECKING:
+    from pyrogram import Client
 
 log = logging.getLogger("health_check")
 
@@ -20,17 +23,42 @@ class HealthCheckServer:
         self.is_healthy = True
         self.status_message = "OK"
         self.ping_interval = ping_interval
+        self.bot_client: Optional['Client'] = None
         self._setup_routes()
         self.server_thread: Optional[threading.Thread] = None
+
+    def set_bot_client(self, client: 'Client'):
+        """Set the bot client reference for connection checking"""
+        self.bot_client = client
+
+    def _check_bot_connection(self) -> tuple[bool, str]:
+        """Check if the bot is connected to Telegram"""
+        if self.bot_client is None:
+            return False, "Bot client not initialized"
+
+        if not self.bot_client.is_connected:
+            return False, "Bot disconnected from Telegram"
+
+        return True, "Bot connected"
 
     def _setup_routes(self):
         @self.app.route('/health', methods=['GET'])
         def health():
-            status_code = 200 if self.is_healthy else 503
-            return jsonify({
-                'status': 'healthy' if self.is_healthy else 'unhealthy',
-                'message': self.status_message
-            }), status_code
+            # Check bot connection status
+            bot_connected, bot_status_msg = self._check_bot_connection()
+
+            # Overall health is healthy only if both app is healthy AND bot is connected
+            overall_healthy = self.is_healthy and bot_connected
+
+            status_code = 200 if overall_healthy else 503
+            response = {
+                'status': 'healthy' if overall_healthy else 'unhealthy',
+                'message': self.status_message,
+                'bot_connected': bot_connected,
+                'bot_status': bot_status_msg
+            }
+
+            return jsonify(response), status_code
 
     def set_status(self, is_healthy: bool, message: str = "OK"):
         """Update health status"""
