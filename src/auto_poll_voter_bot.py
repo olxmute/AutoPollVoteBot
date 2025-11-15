@@ -27,6 +27,7 @@ class AutoPollVoterBot:
             name=config.pyrogram.session_name,
             api_id=config.pyrogram.api_id,
             api_hash=config.pyrogram.api_hash,
+            session_string=config.pyrogram.session_string,
             workdir=workdir,
         )
         self.event_info_parser = event_info_parser

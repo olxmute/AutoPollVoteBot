@@ -15,7 +15,7 @@ A Telegram bot that automatically votes in forum polls based on configurable sch
 
 - Python 3.11+
 - Telegram API credentials (API ID and API Hash)
-- Active Telegram user session
+- Telegram session string
 
 ## Installation
 
@@ -44,6 +44,7 @@ Create a `.env` file with the following variables:
 # Pyrogram API credentials (get from https://my.telegram.org)
 PYROGRAM_API_ID=your_api_id
 PYROGRAM_API_HASH=your_api_hash
+SESSION_STRING=your_session_string_here
 SESSION_NAME=my_user_session
 
 # Group settings
@@ -65,7 +66,8 @@ PORT=8080
 |----------------------|----------|----------------|----------------------------------------------------|
 | `PYROGRAM_API_ID`    | Yes      | -              | Telegram API ID (get from https://my.telegram.org) |
 | `PYROGRAM_API_HASH`  | Yes      | -              | Telegram API Hash                                  |
-| `SESSION_NAME`       | No       | `user_session` | Name of the Pyrogram session file                  |
+| `SESSION_STRING`     | Yes      | -              | Pyrogram session string (no session file needed)   |
+| `SESSION_NAME`       | No       | `user_session` | Name of the Pyrogram session                       |
 | `GROUP_CHAT_ID`      | Yes      | -              | Chat ID of the forum/group to monitor              |
 | `GROUP_VOTE_OPTION`  | No       | `Go!`          | Text of the poll option to vote for                |
 | `VOTE_DELAY_SECONDS` | No       | `5`            | Delay in seconds before casting the vote           |
@@ -110,7 +112,6 @@ docker run -d \
   --name autopollvotebot \
   -p 8080:8080 \
   --env-file .env \
-  -v $(pwd)/my_user_session.session:/app/my_user_session.session \
   autopollvotebot
 ```
 

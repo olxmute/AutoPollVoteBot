@@ -1,6 +1,7 @@
 pyrogram:
   api_id: {{ env.PYROGRAM_API_ID | int }}
   api_hash: "{{ env.PYROGRAM_API_HASH }}"
+  session_string: "{{ env.SESSION_STRING }}"
   session_name: {{ env.SESSION_NAME | default("user_session") }}
 
 group:

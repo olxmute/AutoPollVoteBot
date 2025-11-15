@@ -11,7 +11,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY app.py .
 COPY config.yaml.j2 .
-COPY my_user_session.session .
 COPY src/ ./src/
 
 # Set default port

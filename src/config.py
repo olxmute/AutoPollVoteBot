@@ -11,6 +11,7 @@ from src.yaml_renderer import render_yaml_template
 class PyrogramConfig:
     api_id: int
     api_hash: str
+    session_string: str
     session_name: str = "user"
 
 
