@@ -58,6 +58,7 @@ EVENT_SCHEDULE=your_schedule_here
 # Server settings
 PING_URL=http://localhost:8080 # or your server URL
 PORT=8080
+ENABLE_SELF_PING=false # Set to true to enable periodic self-ping
 ```
 
 ### Environment Variables
@@ -74,6 +75,7 @@ PORT=8080
 | `EVENT_SCHEDULE`     | Yes      | -              | Schedule DSL string (see below)                    |
 | `PORT`               | No       | `8080`         | Port for the health check server                   |
 | `PING_URL`           | Yes      | -              | URL for self-ping health checks                    |
+| `ENABLE_SELF_PING`   | No       | `false`        | Enable periodic self-ping to keep service alive    |
 
 ### Schedule Configuration
 

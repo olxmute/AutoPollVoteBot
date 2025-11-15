@@ -15,3 +15,4 @@ event:
 server:
   port: {{ env.PORT | default(8080) | int }}
   ping_url: {{ env.PING_URL }}
+  enable_self_ping: {{ env.ENABLE_SELF_PING | default("false") | lower }}

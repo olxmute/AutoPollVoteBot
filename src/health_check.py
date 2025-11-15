@@ -92,4 +92,8 @@ class HealthCheckServer:
         log.info(f"Health check server started on http://0.0.0.0:{self.config.server.port}/health")
 
         # Start self-ping if enabled
-        threading.Thread(target=self._self_ping_loop, daemon=True).start()
+        if self.config.server.enable_self_ping:
+            log.info("Self-ping enabled")
+            threading.Thread(target=self._self_ping_loop, daemon=True).start()
+        else:
+            log.info("Self-ping disabled")

@@ -43,6 +43,7 @@ class EventConfig:
 class ServerConfig:
     port: int
     ping_url: str
+    enable_self_ping: bool
 
 
 @dataclass
