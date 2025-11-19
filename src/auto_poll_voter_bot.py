@@ -21,6 +21,7 @@ class AutoPollVoterBot:
             event_info_parser,
             workdir: str = ".",
             health_server=None,
+            notifier=None,
     ):
         self.config = config
         self.app = Client(
@@ -32,6 +33,7 @@ class AutoPollVoterBot:
         )
         self.event_info_parser = event_info_parser
         self.health_server = health_server
+        self.notifier = notifier
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -152,6 +154,9 @@ class AutoPollVoterBot:
                 choice_index,
                 topic_name,
             )
+
+            # Send notification after successful vote
+            await self.send_vote_notification(topic_name)
         except Exception as e:
             log.error("Voting failed on poll %s: %s", message.id, e)
 
@@ -170,6 +175,29 @@ class AutoPollVoterBot:
             chat_id = getattr(message.chat, "id", None) if message.chat else None
             log.info("Received /ping in Saved Messages (%s)", chat_id)
             await client.send_message(SAVED_MESSAGES_CHAT, "pong")
+
+    async def get_current_user_id(self):
+        me = await self.app.get_me()
+        return me.id
+
+    async def send_vote_notification(self, topic_name: str) -> None:
+        """
+        Send a notification message about the vote via Telegram Bot API.
+
+        Args:
+            topic_name: The name of the forum topic where the vote occurred
+        """
+        if not self.notifier:
+            return
+
+        try:
+            user_id = await self.get_current_user_id()
+            message = f"<b>Vote Notification</b>\n\nEvent: {topic_name}"
+
+            # Run synchronous requests call in a thread to avoid blocking
+            await asyncio.to_thread(self.notifier.send_message, user_id, message)
+        except Exception as e:
+            log.error("Failed to send vote notification: %s", e)
 
     def run(self) -> None:
         # Register client with health server if available

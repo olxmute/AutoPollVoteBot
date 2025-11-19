@@ -59,6 +59,9 @@ EVENT_SCHEDULE=your_schedule_here
 PING_URL=http://localhost:8080 # or your server URL
 PORT=8080
 ENABLE_SELF_PING=false # Set to true to enable periodic self-ping
+
+# Notification settings (optional)
+BOT_TOKEN=your_bot_token_here # Optional: Telegram Bot token for notifications
 ```
 
 ### Environment Variables
@@ -76,6 +79,7 @@ ENABLE_SELF_PING=false # Set to true to enable periodic self-ping
 | `PORT`               | No       | `8080`         | Port for the health check server                   |
 | `PING_URL`           | Yes      | -              | URL for self-ping health checks                    |
 | `ENABLE_SELF_PING`   | No       | `false`        | Enable periodic self-ping to keep service alive    |
+| `BOT_TOKEN`          | No       | -              | Telegram Bot token for sending vote notifications  |
 
 ### Schedule Configuration
 
@@ -126,5 +130,6 @@ docker run -d \
     - Verifies if the event matches any configured schedule
     - Automatically votes for the configured option (e.g., "Go!")
     - Skips voting if already voted
+   - Sends a notification message (if `BOT_TOKEN` is configured) with event details
 
 3. Health check endpoint is available at `http://localhost:8080/health`

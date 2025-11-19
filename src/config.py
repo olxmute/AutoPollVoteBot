@@ -47,11 +47,17 @@ class ServerConfig:
 
 
 @dataclass
+class NotificationConfig:
+    bot_token: str
+
+
+@dataclass
 class AppConfig(YAMLWizard):
     pyrogram: PyrogramConfig
     group: GroupConfig
     event: EventConfig
     server: ServerConfig
+    notification: Optional[NotificationConfig] = None
 
 
 def load_config_from_template(template_path: str) -> AppConfig:
