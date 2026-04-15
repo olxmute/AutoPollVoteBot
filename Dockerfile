@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY config.yaml.j2 .
 COPY src/ ./src/
+COPY migrations/ ./migrations/
 
 # Set default port
 ENV PORT=8080
