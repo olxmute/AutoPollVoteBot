@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import time
-from typing import List, Optional
+from typing import Optional
 
 from dataclass_wizard import YAMLWizard
 
@@ -11,15 +11,12 @@ from src.yaml_renderer import render_yaml_template
 class PyrogramConfig:
     api_id: int
     api_hash: str
-    session_string: str
-    session_name: str = "user"
 
 
 @dataclass
 class GroupConfig:
     chat_id: int
     vote_option: str
-    vote_delay_seconds: int
 
 
 @dataclass
@@ -35,8 +32,8 @@ class ScheduledEvent:
 
 
 @dataclass
-class EventConfig:
-    schedule: List[ScheduledEvent]
+class DatabaseConfig:
+    path: str
 
 
 @dataclass
@@ -52,25 +49,25 @@ class NotificationConfig:
 
 
 @dataclass
-class AppConfig(YAMLWizard):
+class CommonConfig(YAMLWizard):
     pyrogram: PyrogramConfig
     group: GroupConfig
-    event: EventConfig
+    database: DatabaseConfig
     server: ServerConfig
     notification: Optional[NotificationConfig] = None
 
 
-def load_config_from_template(template_path: str) -> AppConfig:
+def load_config_from_template(template_path: str) -> CommonConfig:
     """
     Render the Jinja2 YAML template, then let dataclass-wizard parse it
     directly via `from_yaml`.
     """
     rendered_yaml = render_yaml_template(template_path)
     try:
-        cfg = AppConfig.from_yaml(rendered_yaml)
+        cfg = CommonConfig.from_yaml(rendered_yaml)
     except Exception as e:
         # Surface a helpful message if parsing/types fail
         raise ValueError(
-            f"Failed to build AppConfig from rendered YAML: {e}\nRendered YAML:\n{rendered_yaml}"
+            f"Failed to build CommonConfig from rendered YAML: {e}\nRendered YAML:\n{rendered_yaml}"
         ) from e
     return cfg

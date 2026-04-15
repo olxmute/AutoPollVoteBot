@@ -1,20 +1,17 @@
 pyrogram:
   api_id: {{ env.PYROGRAM_API_ID | int }}
   api_hash: "{{ env.PYROGRAM_API_HASH }}"
-  session_string: "{{ env.SESSION_STRING }}"
-  session_name: {{ env.SESSION_NAME | default("user_session") }}
 
 group:
   chat_id: {{ env.GROUP_CHAT_ID | int }}
   vote_option: "{{ env.GROUP_VOTE_OPTION | default("Go!") }}"
-  vote_delay_seconds: {{ env.VOTE_DELAY_SECONDS | default(5) | int }}
 
-event:
-  schedule: {{ env.EVENT_SCHEDULE | parse_schedule_dsl | tojson }}
+database:
+  path: "{{ env.DATABASE_PATH | default('users.db') }}"
 
 server:
   port: {{ env.PORT | default(8080) | int }}
-  ping_url: {{ env.PING_URL }}
+  ping_url: {{ env.PING_URL | default("") }}
   enable_self_ping: {{ env.ENABLE_SELF_PING | default("false") | lower }}
 
 {% if env.BOT_TOKEN is defined and env.BOT_TOKEN %}

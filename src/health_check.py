@@ -1,12 +1,12 @@
 import logging
 import threading
 import time
-from typing import Optional, TYPE_CHECKING
+from typing import List, TYPE_CHECKING
 
 import requests
 from flask import Flask, jsonify
 
-from src.config import AppConfig
+from src.config import CommonConfig
 
 if TYPE_CHECKING:
     from pyrogram import Client
@@ -17,45 +17,38 @@ log = logging.getLogger("health_check")
 class HealthCheckServer:
     """Simple HTTP server for health checks"""
 
-    def __init__(self, config: AppConfig, ping_interval: int = 20):
+    def __init__(self, config: CommonConfig, ping_interval: int = 20):
         self.config = config
         self.app = Flask(__name__)
         self.is_healthy = True
         self.status_message = "OK"
         self.ping_interval = ping_interval
-        self.bot_client: Optional['Client'] = None
+        self._clients: List['Client'] = []
         self._setup_routes()
-        self.server_thread: Optional[threading.Thread] = None
+        self.server_thread = None
 
-    def set_bot_client(self, client: 'Client'):
-        """Set the bot client reference for connection checking"""
-        self.bot_client = client
+    def register_client(self, client: 'Client'):
+        """Register a bot client for connection checking"""
+        self._clients.append(client)
 
-    def _check_bot_connection(self) -> tuple[bool, str]:
-        """Check if the bot is connected to Telegram"""
-        if self.bot_client is None:
-            return False, "Bot client not initialized"
-
-        if not self.bot_client.is_connected:
-            return False, "Bot disconnected from Telegram"
-
-        return True, "Bot connected"
+    def _client_statuses(self) -> list[dict]:
+        return [
+            {'name': c.name, 'connected': c.is_connected}
+            for c in self._clients
+        ]
 
     def _setup_routes(self):
         @self.app.route('/health', methods=['GET'])
         def health():
-            # Check bot connection status
-            bot_connected, bot_status_msg = self._check_bot_connection()
-
-            # Overall health is healthy only if both app is healthy AND bot is connected
-            overall_healthy = self.is_healthy and bot_connected
+            clients = self._client_statuses()
+            all_connected = bool(clients) and all(c['connected'] for c in clients)
+            overall_healthy = self.is_healthy and all_connected
 
             status_code = 200 if overall_healthy else 503
             response = {
                 'status': 'healthy' if overall_healthy else 'unhealthy',
                 'message': self.status_message,
-                'bot_connected': bot_connected,
-                'bot_status': bot_status_msg
+                'clients': clients,
             }
 
             return jsonify(response), status_code

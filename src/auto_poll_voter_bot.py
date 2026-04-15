@@ -7,9 +7,9 @@ from pyrogram import Client, filters
 from pyrogram.handlers import MessageHandler
 from pyrogram.types import Message, ForumTopic, PollOption
 
-from src.config import AppConfig
-
-log = logging.getLogger("forum-poll-voter")
+from src.config import CommonConfig, ScheduledEvent
+from src.schedule_dsl import parse_schedule_dsl
+from src.user_repository import UserRecord
 
 SAVED_MESSAGES_CHAT = "me"
 
@@ -17,27 +17,29 @@ SAVED_MESSAGES_CHAT = "me"
 class AutoPollVoterBot:
     def __init__(
             self,
-            config: AppConfig,
+            common: CommonConfig,
+            user: UserRecord,
             event_info_parser,
-            workdir: str = ".",
-            health_server=None,
             notifier=None,
     ):
-        self.config = config
+        self.common = common
+        self.user = user
+        self.log = logging.getLogger(f"forum-poll-voter.{user.session_name}")
+        self.schedule: List[ScheduledEvent] = [
+            ScheduledEvent(**event) for event in parse_schedule_dsl(user.event_schedule)
+        ]
         self.app = Client(
-            name=config.pyrogram.session_name,
-            api_id=config.pyrogram.api_id,
-            api_hash=config.pyrogram.api_hash,
-            session_string=config.pyrogram.session_string,
-            workdir=workdir,
+            name=user.session_name,
+            api_id=common.pyrogram.api_id,
+            api_hash=common.pyrogram.api_hash,
+            session_string=user.session_string,
         )
         self.event_info_parser = event_info_parser
-        self.health_server = health_server
         self.notifier = notifier
         self._register_handlers()
 
     def _register_handlers(self) -> None:
-        chat_filter = filters.chat(self.config.group.chat_id)
+        chat_filter = filters.chat(self.common.group.chat_id)
         forum_filter = filters.create(self.forum_filter)
         poll_filter = filters.poll
         self.app.add_handler(MessageHandler(self.log_incoming_message, filters.chat(SAVED_MESSAGES_CHAT)))
@@ -63,34 +65,34 @@ class AutoPollVoterBot:
         try:
             event_info = self.event_info_parser.parse_line(name)
         except Exception as exc:
-            log.warning("Topic name didn't parse as event info: %r -> %s", name, exc)
+            self.log.warning("Topic name didn't parse as event info: %r -> %s", name, exc)
             return False
 
         # Check date is in the future
         if event_info.event_date <= date.today():
-            log.info("Topic '%s' is in past; skipping.", name)
+            self.log.info("Topic '%s' is in past; skipping.", name)
             return False
 
         # Check if event matches any scheduled event
         event_type = event_info.event_type.lower()
         weekday = event_info.weekday.lower()
 
-        for scheduled in self.config.event.schedule:
+        for scheduled in self.schedule:
             if scheduled.type.lower() == event_type and scheduled.day.lower() == weekday:
                 # If start_time is configured, it must match
                 if scheduled.start_time is not None:
                     if event_info.start_time != scheduled.start_time:
-                        log.info(
+                        self.log.info(
                             "Topic '%s' matches type and day but start_time differs (expected %s, got %s); skipping.",
                             name, scheduled.start_time, event_info.start_time
                         )
                         continue
 
-                log.info("Topic '%s' matches schedule (type=%s, day=%s, start_time=%s).",
+                self.log.info("Topic '%s' matches schedule (type=%s, day=%s, start_time=%s).",
                          name, scheduled.type, scheduled.day, scheduled.start_time or "any")
                 return True
 
-        log.info("Topic '%s' doesn't match any scheduled event; skipping.", name)
+        self.log.info("Topic '%s' doesn't match any scheduled event; skipping.", name)
         return False
 
     def choose_option(self, options: List[PollOption]) -> Optional[int]:
@@ -98,7 +100,7 @@ class AutoPollVoterBot:
         Decide which option to vote for.
         """
         for i, option in enumerate(options):
-            if self.config.group.vote_option.lower() in (option.text or "").lower():
+            if self.common.group.vote_option.lower() in (option.text or "").lower():
                 return i
         # fallback: pick the first option
         return 0 if options else None
@@ -111,7 +113,7 @@ class AutoPollVoterBot:
             topic: ForumTopic = await self.app.get_forum_topic(chat_id, thread_id)
             return topic.name
         except Exception as e:
-            log.warning("Could not fetch topic name for thread %s: %s", thread_id, e)
+            self.log.warning("Could not fetch topic name for thread %s: %s", thread_id, e)
             return None
 
     async def vote_in_thread_poll(self, message: Message) -> None:
@@ -124,31 +126,31 @@ class AutoPollVoterBot:
         # 1) Read the topic name and enforce your conditions
         topic_name = await self.get_topic_name(message.chat.id, message.message_thread_id)
         if not topic_name:
-            log.info("Skipping; unknown topic name (thread %s).", message.message_thread_id)
+            self.log.info("Skipping; unknown topic name (thread %s).", message.message_thread_id)
             return
 
         if not self.topic_name_matches(topic_name):
             return
 
-        log.info("Topic matched: '%s' (thread %s).", topic_name, message.message_thread_id)
+        self.log.info("Topic matched: '%s' (thread %s).", topic_name, message.message_thread_id)
 
         # 2) Skip voting if already voted
         if message.poll.chosen_option_id is not None:
-            log.info("Already voted; skipping vote.")
+            self.log.info("Already voted; skipping vote. " + str(message.poll.chosen_option_id))
             return
 
         # 3) Decide which option(s) to vote for
         options = message.poll.options or []
         choice_index = self.choose_option(options)
         if choice_index is None:
-            log.warning("No choice indices computed; skipping vote.")
+            self.log.warning("No choice indices computed; skipping vote.")
             return
 
         # 4) Vote (wait for configured delay before sending the vote request)
         try:
-            await asyncio.sleep(self.config.group.vote_delay_seconds)
+            await asyncio.sleep(self.user.vote_delay_seconds)
             await self.app.vote_poll(message.chat.id, message.id, choice_index)
-            log.info(
+            self.log.info(
                 "Voted in poll (message %s) with options %s in topic '%s'.",
                 message.id,
                 choice_index,
@@ -158,7 +160,7 @@ class AutoPollVoterBot:
             # Send notification after successful vote
             await self.send_vote_notification(topic_name)
         except Exception as e:
-            log.error("Voting failed on poll %s: %s", message.id, e)
+            self.log.error("Voting failed on poll %s: %s", message.id, e)
 
     async def on_forum_message(self, client, message: Message):
         """
@@ -167,13 +169,13 @@ class AutoPollVoterBot:
         try:
             await self.vote_in_thread_poll(message)
         except Exception as e:
-            log.exception("Handler crashed: %s", e)
+            self.log.exception("Handler crashed: %s", e)
 
     async def log_incoming_message(self, client, message: Message) -> None:
         """Log "/ping" messages arriving in Saved Messages"""
         if message.text and message.text.strip() == "/ping":
             chat_id = getattr(message.chat, "id", None) if message.chat else None
-            log.info("Received /ping in Saved Messages (%s)", chat_id)
+            self.log.info("Received /ping in Saved Messages (%s)", chat_id)
             await client.send_message(SAVED_MESSAGES_CHAT, "pong")
 
     async def get_current_user_id(self):
@@ -197,12 +199,4 @@ class AutoPollVoterBot:
             # Run synchronous requests call in a thread to avoid blocking
             await asyncio.to_thread(self.notifier.send_message, user_id, message)
         except Exception as e:
-            log.error("Failed to send vote notification: %s", e)
-
-    def run(self) -> None:
-        # Register client with health server if available
-        if self.health_server:
-            self.health_server.set_bot_client(self.app)
-
-        # Run the client
-        self.app.run()
+            self.log.error("Failed to send vote notification: %s", e)
