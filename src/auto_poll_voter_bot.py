@@ -1,17 +1,21 @@
 import asyncio
 import logging
 from datetime import date
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
 from pyrogram.handlers import MessageHandler
-from pyrogram.types import Message, ForumTopic, PollOption
+from pyrogram.types import Message, PollOption
+
+if TYPE_CHECKING:
+    from pyrogram.types import ForumTopic
+
+    from src.auto_poll_manager_bot import AutoPollManagerBot
 
 from src.config import CommonConfig, ScheduledEvent
 from src.schedule_dsl import parse_schedule_dsl
 from src.user_repository import UserRecord
-
-SAVED_MESSAGES_CHAT = "me"
 
 
 class AutoPollVoterBot:
@@ -20,7 +24,7 @@ class AutoPollVoterBot:
             common: CommonConfig,
             user: UserRecord,
             event_info_parser,
-            notifier=None,
+            manager: "AutoPollManagerBot",
     ):
         self.common = common
         self.user = user
@@ -35,14 +39,13 @@ class AutoPollVoterBot:
             session_string=user.session_string,
         )
         self.event_info_parser = event_info_parser
-        self.notifier = notifier
+        self.manager = manager
         self._register_handlers()
 
     def _register_handlers(self) -> None:
         chat_filter = filters.chat(self.common.group.chat_id)
         forum_filter = filters.create(self.forum_filter)
         poll_filter = filters.poll
-        self.app.add_handler(MessageHandler(self.log_incoming_message, filters.chat(SAVED_MESSAGES_CHAT)))
         self.app.add_handler(
             MessageHandler(
                 self.on_forum_message,
@@ -166,37 +169,31 @@ class AutoPollVoterBot:
         """
         Triggered for every new message in the specified forum-enabled chat.
         """
+        if not self.user.enabled:
+            self.log.debug("Autovoting disabled; ignoring.")
+            return
         try:
             await self.vote_in_thread_poll(message)
         except Exception as e:
             self.log.exception("Handler crashed: %s", e)
 
-    async def log_incoming_message(self, client, message: Message) -> None:
-        """Log "/ping" messages arriving in Saved Messages"""
-        if message.text and message.text.strip() == "/ping":
-            chat_id = getattr(message.chat, "id", None) if message.chat else None
-            self.log.info("Received /ping in Saved Messages (%s)", chat_id)
-            await client.send_message(SAVED_MESSAGES_CHAT, "pong")
-
-    async def get_current_user_id(self):
-        me = await self.app.get_me()
-        return me.id
-
     async def send_vote_notification(self, topic_name: str) -> None:
         """
-        Send a notification message about the vote via Telegram Bot API.
+        Send a notification message about the vote via the manager bot.
 
         Args:
             topic_name: The name of the forum topic where the vote occurred
         """
-        if not self.notifier:
+        if self.user.telegram_user_id is None:
+            self.log.warning(
+                "Skipping notification: telegram_user_id not set (backfill didn't run)."
+            )
             return
 
+        text = f"<b>Vote Notification</b>\n\nEvent: {topic_name}"
         try:
-            user_id = await self.get_current_user_id()
-            message = f"<b>Vote Notification</b>\n\nEvent: {topic_name}"
-
-            # Run synchronous requests call in a thread to avoid blocking
-            await asyncio.to_thread(self.notifier.send_message, user_id, message)
+            await self.manager.app.send_message(
+                chat_id=self.user.telegram_user_id, text=text, parse_mode=ParseMode.HTML,
+            )
         except Exception as e:
             self.log.error("Failed to send vote notification: %s", e)

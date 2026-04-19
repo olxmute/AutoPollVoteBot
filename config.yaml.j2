@@ -14,7 +14,5 @@ server:
   ping_url: {{ env.PING_URL | default("") }}
   enable_self_ping: {{ env.ENABLE_SELF_PING | default("false") | lower }}
 
-{% if env.BOT_TOKEN is defined and env.BOT_TOKEN %}
-notification:
+manager:
   bot_token: "{{ env.BOT_TOKEN }}"
-{% endif %}
