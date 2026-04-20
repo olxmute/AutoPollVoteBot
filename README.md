@@ -140,11 +140,12 @@ This configures the bot to vote on:
 
 Each registered user can DM the bot to manage their autovoting configuration:
 
-| Command    | Description                                                   |
-|------------|---------------------------------------------------------------|
-| `/enable`  | Resume autovoting (sets `enabled = 1` in DB)                  |
-| `/disable` | Pause autovoting (sets `enabled = 0` in DB)                   |
-| `/status`  | Report voter client liveness and current voting enabled state |
+| Command      | Description                                                   |
+|--------------|---------------------------------------------------------------|
+| `/enable`    | Resume autovoting (sets `enabled = 1` in DB)                  |
+| `/disable`   | Pause autovoting (sets `enabled = 0` in DB)                   |
+| `/status`    | Report voter client liveness and current voting enabled state |
+| `/schedule`  | Open the inline-keyboard schedule editor (see below)          |
 
 Commands are **DM-only** and only work for users registered in the database. Unregistered Telegram accounts receive:
 `"You're not registered. Contact the administrator."`
@@ -157,6 +158,40 @@ Commands are **DM-only** and only work for users registered in the database. Unr
 Voter: up
 Voting: enabled
 ```
+
+### Schedule Editor (`/schedule`)
+
+The `/schedule` command opens an inline keyboard that lets you view, add, and remove schedule entries without needing DB access.
+
+**Main screen** — lists all current entries and shows action buttons:
+
+```
+Your schedule:
+1. Game wed 20:30
+2. Training tue
+
+[➕ Add]  [❌ Remove]  [✖ Close]
+```
+
+- If the schedule is empty, only `[➕ Add]` and `[✖ Close]` are shown.
+- If the DB entry is malformed, an error message is shown with only `[✖ Close]`.
+
+**Add flow:**
+
+1. Tap `[➕ Add]` → choose event type: `[🏐 Game]` or `[🏃 Training]`
+2. Choose a weekday (Mon–Sun)
+3. Entry is appended (no start time — time-less entry matches any poll at that day)
+4. Main screen is redrawn with the new entry
+
+**Remove flow:**
+
+1. Tap `[❌ Remove]` → each existing entry appears as a button with its details
+2. Tap any entry to delete it immediately (no confirmation prompt)
+3. The remove list stays open after deletion to support bulk cleanup; tap `[⬅ Back]` to return to the main screen
+
+**Live propagation:** changes take effect on the next poll without a bot restart — the voter re-parses the schedule from the database on every incoming forum message.
+
+> **Note:** If the bot restarts while you have a `/schedule` keyboard open, the inline buttons become stale. Simply re-send `/schedule` to get a fresh keyboard.
 
 ## Usage
 

@@ -53,7 +53,7 @@ The bot uses a Jinja2-based configuration system for shared config, plus a SQLit
 1. **AutoPollVoterBot** (`src/auto_poll_voter_bot.py`):
    - One instance per user; wraps a `pyrogram.Client`
    - Constructor: `(common: CommonConfig, user: UserRecord, event_info_parser, manager: AutoPollManagerBot)`
-   - Parses the user's `event_schedule` DSL into `ScheduledEvent` objects at init
+   - Does **not** cache parsed schedule — re-parses `self.user.event_schedule` on every call to `topic_name_matches()`; schedule edits via ScheduleEditor propagate automatically through the shared `UserRecord` without a restart
    - Core logic: `on_forum_message()` -> `vote_in_thread_poll()`
    - Validates events via `topic_name_matches()` before voting
    - Reads `self.user.enabled` at the top of `on_forum_message`; returns early if False
@@ -78,23 +78,36 @@ The bot uses a Jinja2-based configuration system for shared config, plus a SQLit
 
 5. **AutoPollManagerBot** (`src/auto_poll_manager_bot.py`):
    - Telegram bot that lets registered users manage their autovoting config via DM commands
-   - Commands: `/enable`, `/disable`, `/status` (DM-only, registered users only)
+   - Commands: `/enable`, `/disable`, `/status`, `/schedule` (DM-only, registered users only)
    - Maintains a registry of `VoterHandle` objects keyed by Telegram user ID
    - Voter bots use `manager.app.send_message(...)` directly for vote notifications
+   - Wires in `ScheduleEditor` on construction: `self._schedule_editor = ScheduleEditor(repo, self._handles)`
    - Replaces the old REST-based `AutoPollNotifierBot`
 
-6. **VoterHandle** (`src/auto_poll_manager_bot.py`):
+6. **VoterHandle** (`src/voter_handle.py`):
    - Two-field dataclass: `user: UserRecord`, `client: pyrogram.Client`
+   - Extracted to its own module to break the circular import between manager and voter
    - The `user` field is the **same `UserRecord` instance** shared by reference with the voter bot
-   - This means `/enable`/`/disable` writing `handle.user.enabled` is immediately visible in the voter's guard
+   - This means `/enable`/`/disable` and schedule mutations via ScheduleEditor are immediately visible in the voter
 
-7. **Database** (`src/database.py`):
+7. **ScheduleEditor** (`src/schedule_editor.py`):
+   - Owns the entire `/schedule` inline-keyboard UI: command handler + all `sch:*` callback routes
+   - Constructor: `(repo: UserRepository, handles: Dict[int, VoterHandle])`; the dict is passed by reference so newly-registered voters are visible immediately
+   - `register_handlers(app)` registers one `MessageHandler` (for `/schedule`) and one `CallbackQueryHandler` (for `^sch:` callbacks)
+   - Add flow: `/schedule` → `[Add]` → type picker (Game / Training) → day picker (Mon–Sun) → entry appended, DSL saved, main screen redrawn
+   - Remove flow: `[Remove]` → numbered list of current entries → tap any → entry removed, list redrawn (stays on remove screen)
+   - `Close` dismisses the keyboard; `Back` always returns one level up
+   - Persists via `repo.set_event_schedule(telegram_user_id, new_dsl)` and immediately mutates `handle.user.event_schedule`; mutation propagates to voter via the shared `UserRecord` reference
+   - Callback data scheme (stateless, ≤64 bytes): `sch:main`, `sch:close`, `sch:add`, `sch:add:t:<Type>`, `sch:add:d:<Type>:<day>`, `sch:rm`, `sch:rm:<index>`
+
+8. **Database** (`src/database.py`):
    - `apply_migrations(db_path)`: applies pending yoyo migrations at startup
 
-8. **User Repository** (`src/user_repository.py`):
+9. **User Repository** (`src/user_repository.py`):
    - `UserRecord` dataclass: `id`, `session_name`, `session_string`, `event_schedule`, `vote_delay_seconds`, `telegram_user_id: Optional[int]`, `enabled: bool`
    - `UserRecord.enabled` is **mutable runtime state**: hydrated from DB at startup (`True` for enabled rows), then mutated in-place by manager commands — no locks needed (single event loop)
-   - `UserRepository(db_path)` class: `get_enabled_users()`, `set_telegram_user_id(user_id, telegram_user_id)`, `set_enabled(telegram_user_id, enabled) -> int`
+   - `UserRecord.event_schedule` is also **mutable runtime state**: mutated in-place by `ScheduleEditor` after every save; re-parsed by the voter on the next poll
+   - `UserRepository(db_path)` class: `get_enabled_users()`, `set_telegram_user_id(user_id, telegram_user_id)`, `set_enabled(telegram_user_id, enabled) -> int`, `set_event_schedule(telegram_user_id, dsl) -> int`
 
 ### Startup Sequence (`app.py`)
 
@@ -131,7 +144,8 @@ The bot uses a Jinja2-based configuration system for shared config, plus a SQLit
 ### Configuration Rendering
 
 The `yaml_renderer.py` module uses Jinja2 with a custom filter:
-- `parse_schedule_dsl`: Converts DSL string to YAML-compatible structure (used historically; DSL is now in DB)
+- `parse_schedule_dsl`: Converts DSL string to YAML-compatible structure; exposed as a Jinja2 filter for legacy template compatibility; also called on every poll arrival in the voter (stateless re-parse replaces the old startup cache) and on every schedule save in `ScheduleEditor`
+- `serialize_schedule_dsl` (in `src/schedule_dsl.py`): inverse of the parser; called by `ScheduleEditor._save` to write the updated DSL back to DB
 - Templates have access to `env` object containing all environment variables
 - StrictUndefined mode ensures missing variables raise errors (including missing `BOT_TOKEN`)
 
@@ -140,14 +154,16 @@ The `yaml_renderer.py` module uses Jinja2 with a custom filter:
 ```
 app.py                          # Entry point
 src/
-  auto_poll_voter_bot.py        # Per-user voter client
-  auto_poll_manager_bot.py      # Manager bot (commands + notifications)
+  auto_poll_voter_bot.py        # Per-user voter client (stateless schedule re-parse per poll)
+  auto_poll_manager_bot.py      # Manager bot (commands + notifications; wires ScheduleEditor)
   config.py                     # CommonConfig, ManagerBotConfig dataclasses
   database.py                   # Migration runner
   event_info_parser.py          # Topic name parser
   health_check.py               # Flask health endpoint
-  schedule_dsl.py               # Schedule DSL parser
+  schedule_dsl.py               # Schedule DSL parser + serialize_schedule_dsl
+  schedule_editor.py            # Inline-keyboard /schedule UI (Add / Remove flows)
   user_repository.py            # UserRecord, UserRepository
+  voter_handle.py               # VoterHandle dataclass (extracted to break circular import)
   yaml_renderer.py              # Jinja2 template renderer
 migrations/
   0001_create_users.sql
@@ -158,6 +174,8 @@ tests/
   test_auto_poll_manager_bot.py
   test_auto_poll_voter_bot.py
   test_config.py
+  test_schedule_dsl.py          # serialize/parse roundtrip tests
+  test_schedule_editor.py       # ScheduleEditor handler + callback tests
   test_user_repository.py
 config.yaml.j2                  # Jinja2 config template
 ```
@@ -171,6 +189,6 @@ config.yaml.j2                  # Jinja2 config template
 - **Schedule matching**: If `start_time` is specified in schedule, event must match exactly; otherwise any time is accepted
 - **BOT_TOKEN required**: Startup fails immediately if `BOT_TOKEN` is not set (Jinja2 StrictUndefined raises)
 - **telegram_user_id backfill**: On first boot, each voter's `telegram_user_id` is populated automatically via `get_me()`; no manual entry needed
-- **Shared UserRecord**: The voter and its `VoterHandle` in the manager hold the same `UserRecord` object by reference — `/enable`/`/disable` mutations are instantly visible to the voter guard
+- **Shared UserRecord**: The voter and its `VoterHandle` in the manager hold the same `UserRecord` object by reference — `/enable`/`/disable` mutations and schedule edits via `ScheduleEditor` are instantly visible to the voter on the next poll (no restart needed)
 - **No `/ping` handler**: The old Saved-Messages `/ping → pong` flow has been removed; use `/status` instead
 - **remember always update README.md and CLAUDE.md on functionality change**

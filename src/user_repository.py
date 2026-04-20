@@ -56,6 +56,27 @@ class UserRepository:
         finally:
             conn.close()
 
+    def set_event_schedule(self, telegram_user_id: int, dsl: str) -> int:
+        """Update the event_schedule for the user identified by telegram_user_id.
+
+        Returns the number of rows affected (0 if no matching row, 1 on success).
+
+        Raises ValueError if telegram_user_id is None, since NULL equality in SQL
+        silently matches 0 rows.
+        """
+        if telegram_user_id is None:
+            raise ValueError("telegram_user_id must not be None")
+        conn = sqlite3.connect(self._db_path)
+        try:
+            cursor = conn.execute(
+                "UPDATE users SET event_schedule = ? WHERE telegram_user_id = ?",
+                (dsl, telegram_user_id),
+            )
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            conn.close()
+
     def set_enabled(self, telegram_user_id: int, enabled: bool) -> int:
         """Enable or disable voting for the user identified by telegram_user_id.
 

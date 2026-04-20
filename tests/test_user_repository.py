@@ -93,6 +93,43 @@ class TestSetTelegramUserId:
         assert users[0].telegram_user_id is None
 
 
+class TestSetEventSchedule:
+    def test_set_event_schedule_updates_row(self, tmp_db):
+        """Insert a user with telegram_user_id set, call method, verify DB row and return == 1."""
+        _insert_user(tmp_db, telegram_user_id=42, event_schedule="Game wed 20:30")
+        repo = UserRepository(tmp_db)
+        rows = repo.set_event_schedule(42, "Training tue")
+        assert rows == 1
+        conn = sqlite3.connect(tmp_db)
+        row = conn.execute(
+            "SELECT event_schedule FROM users WHERE telegram_user_id = 42"
+        ).fetchone()
+        conn.close()
+        assert row[0] == "Training tue"
+
+    def test_set_event_schedule_missing_user_returns_0(self, tmp_db):
+        """Call with unknown telegram_user_id, verify returns 0 (no raise)."""
+        _insert_user(tmp_db, telegram_user_id=42)
+        repo = UserRepository(tmp_db)
+        rows = repo.set_event_schedule(9999, "Game sat")
+        assert rows == 0
+
+    def test_set_event_schedule_none_telegram_id_raises(self, tmp_db):
+        """Verify ValueError raised when telegram_user_id=None."""
+        repo = UserRepository(tmp_db)
+        with pytest.raises(ValueError, match="telegram_user_id must not be None"):
+            repo.set_event_schedule(None, "Game wed")
+
+    def test_set_event_schedule_reflected_in_get_enabled_users(self, tmp_db):
+        """Subsequent get_enabled_users() reflects the updated event_schedule."""
+        _insert_user(tmp_db, telegram_user_id=42, event_schedule="Game wed 20:30")
+        repo = UserRepository(tmp_db)
+        repo.set_event_schedule(42, "Training tue; Game sat 11:00")
+        users = repo.get_enabled_users()
+        assert len(users) == 1
+        assert users[0].event_schedule == "Training tue; Game sat 11:00"
+
+
 class TestSetEnabled:
     def test_returns_one_for_known_user(self, tmp_db):
         _insert_user(tmp_db, telegram_user_id=42)

@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import sqlite3
-import sys
 
 from src.auto_poll_manager_bot import AutoPollManagerBot, VoterHandle
 from src.auto_poll_voter_bot import AutoPollVoterBot
@@ -22,22 +21,53 @@ logging.getLogger('werkzeug').setLevel(logging.ERROR)
 log = logging.getLogger("forum-poll-voter")
 
 
-async def main(common, repo, manager_bot, voter_bots, health_server):
+async def main(common, repo, health_server):
     """
     Orchestrate startup, run forever, and shut down cleanly.
 
     Start order:
-      1. All voter clients (they must be up so get_me() works).
-      2. Backfill telegram_user_id and register each voter in the manager.
-      3. Manager bot client (only after registry is fully populated).
-      4. Health server set to healthy.
-      5. Block on an Event until cancelled (SIGINT/Ctrl+C triggers finally).
+      1. Construct all Pyrogram clients inside the running asyncio loop.
+      2. Start all voter clients.
+      3. Backfill telegram_user_id and register each voter in the manager.
+      4. Start manager bot.
+      5. Health server set to healthy.
+      6. Block on an Event until cancelled (SIGINT/Ctrl+C triggers finally).
 
     Shutdown order (finally block):
       manager first, then voters (reverse of start).
     """
     started_voters = []
     manager_started = False
+
+    event_info_parser = EventInfoParser()
+
+    # Construct the manager bot inside the running event loop.
+    manager_bot = AutoPollManagerBot(common, repo)
+
+    # Load enabled users after migrations have already run.
+    users = repo.get_enabled_users()
+    if not users:
+        raise RuntimeError(
+            f"No enabled users found in the database. Add users to '{common.database.path}' and restart."
+        )
+
+    log.info("Loaded %d enabled user(s) from database.", len(users))
+
+    # Construct one voter per enabled user inside the running event loop.
+    voter_bots = [
+        AutoPollVoterBot(
+            common=common,
+            user=user,
+            event_info_parser=event_info_parser,
+            manager=manager_bot,
+        )
+        for user in users
+    ]
+
+    # Register all clients (voters + manager) with the health server.
+    for bot in voter_bots:
+        health_server.register_client(bot.app)
+    health_server.register_client(manager_bot.app)
 
     try:
         # 1. Start each voter client (track which ones started for safe cleanup).
@@ -83,12 +113,12 @@ async def main(common, repo, manager_bot, voter_bots, health_server):
 
     finally:
         # Graceful shutdown: manager first, then only the voters that were started.
-        # Each stop() is guarded individually so a failure in one doesn't block others.
         if manager_started:
             try:
                 await manager_bot.app.stop()
             except Exception as e:
                 log.warning("Error stopping manager bot: %s", e)
+
         for bot in reversed(started_voters):
             try:
                 await bot.app.stop()
@@ -103,40 +133,13 @@ if __name__ == "__main__":
     apply_migrations(common.database.path)
 
     repo = UserRepository(common.database.path)
-    users = repo.get_enabled_users()
-    if not users:
-        log.error("No enabled users found in the database. Add users to '%s' and restart.", common.database.path)
-        sys.exit(1)
-
-    log.info("Loaded %d enabled user(s) from database.", len(users))
 
     # Start health check server.
     health_server = HealthCheckServer(config=common)
     health_server.start()
 
-    event_info_parser = EventInfoParser()
-
-    # Construct the manager bot (required; BOT_TOKEN must be set).
-    manager_bot = AutoPollManagerBot(common, repo)
-
-    # Construct one voter per enabled user.
-    voter_bots = [
-        AutoPollVoterBot(
-            common=common,
-            user=user,
-            event_info_parser=event_info_parser,
-            manager=manager_bot,
-        )
-        for user in users
-    ]
-
-    # Register all clients (voters + manager) with the health server.
-    for bot in voter_bots:
-        health_server.register_client(bot.app)
-    health_server.register_client(manager_bot.app)
-
     try:
-        asyncio.run(main(common, repo, manager_bot, voter_bots, health_server))
+        asyncio.run(main(common, repo, health_server))
     except (KeyboardInterrupt, SystemExit):
         log.info("Shutting down.")
     except asyncio.CancelledError:

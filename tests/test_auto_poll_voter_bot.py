@@ -1,4 +1,4 @@
-"""Tests for AutoPollVoterBot (Task 6).
+"""Tests for AutoPollVoterBot (Task 6 and Task 3).
 
 Covers:
   - enabled guard: on_forum_message returns early when user.enabled is False
@@ -7,8 +7,14 @@ Covers:
   - send_vote_notification: logs and does NOT re-raise when manager.send_message raises
   - send_vote_notification: logs warning and does NOT call manager.send_message when
     telegram_user_id is None
+  - topic_name_matches: stateless re-parse of event_schedule on every call (Task 3)
+  - topic_name_matches: start_time filter works (Task 3)
+  - topic_name_matches: empty schedule returns False (Task 3)
+  - topic_name_matches: unparseable DSL logs and returns False (Task 3)
 """
 import asyncio
+import logging
+from datetime import date, time
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,6 +22,7 @@ from pyrogram.enums import ParseMode
 
 from src.auto_poll_voter_bot import AutoPollVoterBot
 from src.config import CommonConfig, DatabaseConfig, GroupConfig, ManagerBotConfig, PyrogramConfig, ServerConfig
+from src.event_info_parser import EventInfo
 from src.user_repository import UserRecord
 
 
@@ -243,3 +250,114 @@ class TestRemovedBehavior:
         manager = _make_manager()
         voter = _make_voter(manager=manager)
         assert voter.manager is manager
+
+    def test_no_schedule_cache_attribute(self):
+        """voter must not have a 'schedule' attribute (cache was dropped in Task 3)."""
+        voter = _make_voter()
+        assert not hasattr(voter, "schedule"), (
+            "'schedule' cache attribute should have been removed in Task 3"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Helpers for topic_name_matches tests
+# ---------------------------------------------------------------------------
+
+def _make_event_info(
+    event_type: str = "Game",
+    event_date: date = date(2099, 1, 1),
+    weekday: str = "Wed",
+    start_time: time = time(20, 0),
+    end_time: time = time(22, 0),
+) -> EventInfo:
+    return EventInfo(
+        event_type=event_type,
+        event_date=event_date,
+        weekday=weekday,
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests: topic_name_matches (stateless re-parse — Task 3)
+# ---------------------------------------------------------------------------
+
+class TestTopicNameMatchesStatelessReParse:
+    """Tests that topic_name_matches re-parses event_schedule on every call (Task 3)."""
+
+    def _make_voter_with_schedule(self, event_schedule: str) -> AutoPollVoterBot:
+        user = UserRecord(
+            id=1,
+            session_name="alice",
+            session_string="SESS",
+            event_schedule=event_schedule,
+            vote_delay_seconds=0,
+            telegram_user_id=111,
+            enabled=True,
+        )
+        return _make_voter(user=user)
+
+    def test_live_reparse_after_schedule_mutation(self):
+        """After bot.user.event_schedule = 'Game wed', topic_name_matches returns True for matching topic."""
+        voter = self._make_voter_with_schedule("Training sat")
+
+        # Set up parser to return a matching event info
+        future_wed = date(2099, 1, 5)  # a Wednesday
+        voter.event_info_parser.parse_line.return_value = _make_event_info(
+            event_type="Game", event_date=future_wed, weekday="Wed", start_time=time(20, 0)
+        )
+
+        # Initially "Training sat" doesn't match "Game Wed" event
+        assert voter.topic_name_matches("Game 2099-01-05, Wed, 20:00-22:00") is False
+
+        # Mutate the schedule in-memory (simulates ScheduleEditor save)
+        voter.user.event_schedule = "Game wed"
+
+        # Now the schedule matches
+        assert voter.topic_name_matches("Game 2099-01-05, Wed, 20:00-22:00") is True
+
+    def test_start_time_filter_matches_exact_time(self):
+        """With 'Game wed 20:30', matcher returns True for a topic with start_time 20:30."""
+        voter = self._make_voter_with_schedule("Game wed 20:30")
+
+        future_wed = date(2099, 1, 5)
+        voter.event_info_parser.parse_line.return_value = _make_event_info(
+            event_type="Game", event_date=future_wed, weekday="Wed", start_time=time(20, 30)
+        )
+
+        assert voter.topic_name_matches("Game 2099-01-05, Wed, 20:30-22:00") is True
+
+    def test_start_time_filter_rejects_different_time(self):
+        """With 'Game wed 20:30', matcher returns False for a topic with start_time 20:00."""
+        voter = self._make_voter_with_schedule("Game wed 20:30")
+
+        future_wed = date(2099, 1, 5)
+        voter.event_info_parser.parse_line.return_value = _make_event_info(
+            event_type="Game", event_date=future_wed, weekday="Wed", start_time=time(20, 0)
+        )
+
+        assert voter.topic_name_matches("Game 2099-01-05, Wed, 20:00-22:00") is False
+
+    def test_empty_schedule_returns_false(self):
+        """With empty event_schedule, topic_name_matches returns False for any topic."""
+        voter = self._make_voter_with_schedule("")
+
+        future_wed = date(2099, 1, 5)
+        voter.event_info_parser.parse_line.return_value = _make_event_info(
+            event_type="Game", event_date=future_wed, weekday="Wed", start_time=time(20, 0)
+        )
+
+        assert voter.topic_name_matches("Game 2099-01-05, Wed, 20:00-22:00") is False
+
+    def test_unparseable_dsl_logs_and_returns_false(self, caplog):
+        """Unparseable DSL (e.g., missing day) logs via log.exception and returns False without crashing."""
+        # "Game" alone has no day — parse_schedule_dsl raises ValueError
+        voter = self._make_voter_with_schedule("Game")
+
+        with caplog.at_level(logging.ERROR, logger="forum-poll-voter.alice"):
+            result = voter.topic_name_matches("Game 2099-01-05, Wed, 20:00-22:00")
+
+        assert result is False
+        # log.exception records at ERROR level
+        assert any("Could not parse event_schedule" in r.message for r in caplog.records)

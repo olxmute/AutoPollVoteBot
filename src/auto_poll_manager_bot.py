@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from dataclasses import dataclass
 from typing import Dict, Optional
 
 from pyrogram import Client, filters
@@ -8,20 +7,12 @@ from pyrogram.handlers import MessageHandler
 from pyrogram.types import Message
 
 from src.config import CommonConfig
-from src.user_repository import UserRecord, UserRepository
+from src.user_repository import UserRepository
+from src.voter_handle import VoterHandle  # re-exported for backward compatibility
+from src.schedule_editor import ScheduleEditor
 
-
-@dataclass
-class VoterHandle:
-    """Thin wrapper associating a voter's UserRecord with its Pyrogram Client.
-
-    The ``enabled`` state lives on ``user.enabled`` — the same UserRecord
-    instance is shared by reference with the voter, so mutations here are
-    immediately visible in the voter's ``on_forum_message`` guard.
-    """
-
-    user: UserRecord
-    client: Client
+# Re-export VoterHandle so existing ``from src.auto_poll_manager_bot import VoterHandle`` still works.
+__all__ = ["AutoPollManagerBot", "VoterHandle"]
 
 
 class AutoPollManagerBot:
@@ -61,6 +52,8 @@ class AutoPollManagerBot:
         self.app.add_handler(
             MessageHandler(self._handle_status, filters.command("status") & filters.private)
         )
+        self._schedule_editor = ScheduleEditor(repo, self._handles)
+        self._schedule_editor.register_handlers(self.app)
 
     async def _handle_enable(self, client, message: Message) -> None:
         """Handle /enable command: resume autovoting for the sender."""

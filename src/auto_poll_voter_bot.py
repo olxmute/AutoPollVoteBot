@@ -29,9 +29,6 @@ class AutoPollVoterBot:
         self.common = common
         self.user = user
         self.log = logging.getLogger(f"forum-poll-voter.{user.session_name}")
-        self.schedule: List[ScheduledEvent] = [
-            ScheduledEvent(**event) for event in parse_schedule_dsl(user.event_schedule)
-        ]
         self.app = Client(
             name=user.session_name,
             api_id=common.pyrogram.api_id,
@@ -64,7 +61,16 @@ class AutoPollVoterBot:
           - parse into a valid EventInfo,
           - have event_date in the future (strictly greater than today).
           - match at least one scheduled event (type, day, and optionally start_time).
+
+        Re-parses self.user.event_schedule on every call so that schedule edits
+        made via ScheduleEditor are immediately visible without a restart.
         """
+        try:
+            events = [ScheduledEvent(**e) for e in parse_schedule_dsl(self.user.event_schedule)]
+        except Exception as exc:
+            self.log.exception("Could not parse event_schedule: %r -> %s", self.user.event_schedule, exc)
+            return False
+
         try:
             event_info = self.event_info_parser.parse_line(name)
         except Exception as exc:
@@ -80,7 +86,7 @@ class AutoPollVoterBot:
         event_type = event_info.event_type.lower()
         weekday = event_info.weekday.lower()
 
-        for scheduled in self.schedule:
+        for scheduled in events:
             if scheduled.type.lower() == event_type and scheduled.day.lower() == weekday:
                 # If start_time is configured, it must match
                 if scheduled.start_time is not None:

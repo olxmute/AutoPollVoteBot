@@ -510,3 +510,71 @@ class TestHandleStatus:
         msg = _make_message(from_user_id=111)
         asyncio.run(manager._handle_status(None, msg))
         msg.reply_text.assert_awaited_once_with("Internal error, try again.")
+
+
+# ---------------------------------------------------------------------------
+# Tests: Task 7 — ScheduleEditor wiring
+# ---------------------------------------------------------------------------
+
+class TestScheduleEditorWiring:
+    def test_manager_wires_schedule_editor(self):
+        """ScheduleEditor is constructed with (repo, manager._handles) and
+        register_handlers is called with manager.app."""
+        common = _make_common()
+        repo = _make_repo()
+
+        with patch("src.auto_poll_manager_bot.Client") as mock_client_cls, \
+             patch("src.auto_poll_manager_bot.ScheduleEditor") as mock_editor_cls:
+            mock_client_cls.return_value = MagicMock()
+            mock_editor_instance = MagicMock()
+            mock_editor_cls.return_value = mock_editor_instance
+
+            manager = AutoPollManagerBot(common, repo)
+
+        # ScheduleEditor constructed with repo and the manager's _handles dict
+        mock_editor_cls.assert_called_once_with(repo, manager._handles)
+        # register_handlers called with manager.app
+        mock_editor_instance.register_handlers.assert_called_once_with(manager.app)
+
+    def test_manager_schedule_editor_stored_as_attribute(self):
+        """AutoPollManagerBot exposes _schedule_editor attribute after init."""
+        manager = _make_manager()
+        assert hasattr(manager, "_schedule_editor")
+
+    def test_existing_commands_still_work_after_wiring(self):
+        """Existing /enable, /disable, /status handlers are registered unaffected.
+
+        We verify by inspecting the add_handler call list on manager.app —
+        the first three calls must be MessageHandlers for enable/disable/status
+        (in order), and the schedule-editor handlers come after.
+        """
+        from pyrogram.handlers import MessageHandler, CallbackQueryHandler
+
+        common = _make_common()
+        repo = _make_repo()
+
+        with patch("src.auto_poll_manager_bot.Client") as mock_client_cls:
+            mock_app = MagicMock()
+            mock_client_cls.return_value = mock_app
+            manager = AutoPollManagerBot(common, repo)
+
+        # Collect all add_handler positional-arg types
+        call_args_list = mock_app.add_handler.call_args_list
+        # At least 5 handlers: enable, disable, status, schedule-cmd, sch-callback
+        assert len(call_args_list) >= 5, (
+            f"Expected at least 5 add_handler calls, got {len(call_args_list)}"
+        )
+
+        handler_types = [type(call.args[0]).__name__ for call in call_args_list]
+        # First three must be MessageHandlers (enable, disable, status)
+        assert handler_types[:3] == ["MessageHandler", "MessageHandler", "MessageHandler"], (
+            f"First 3 handlers should be MessageHandler, got: {handler_types[:3]}"
+        )
+        # 4th must be MessageHandler for /schedule
+        assert handler_types[3] == "MessageHandler", (
+            f"4th handler should be MessageHandler (/schedule), got: {handler_types[3]}"
+        )
+        # 5th must be CallbackQueryHandler for sch:* callbacks
+        assert handler_types[4] == "CallbackQueryHandler", (
+            f"5th handler should be CallbackQueryHandler (sch:*), got: {handler_types[4]}"
+        )
