@@ -167,7 +167,7 @@ class ScheduleEditor:
                 if event_type not in _VALID_TYPES:
                     await query.answer("Internal error, try again.", show_alert=True)
                     return
-                await self._render_add_day(query, event_type)
+                await self._render_add_day(query, handle, event_type)
                 return
 
             # sch:add:d:<Type>:<day> — day chosen; append and save
@@ -221,24 +221,49 @@ class ScheduleEditor:
         await query.message.edit_text("Choose event type:", reply_markup=markup)
         await query.answer()
 
-    async def _render_add_day(self, query: CallbackQuery, event_type: str) -> None:
-        """Show the day picker screen: 7 weekday buttons + Back."""
+    async def _render_add_day(
+            self, query: CallbackQuery, handle: VoterHandle, event_type: str
+    ) -> None:
+        """Show the day picker — only days not already scheduled for this type.
+
+        Uniqueness is enforced per ``(type, day)`` pair: a day already taken
+        for ``event_type`` is omitted; the same day for the other type is
+        still offered.
+        """
+        try:
+            events = parse_schedule_dsl(handle.user.event_schedule)
+        except Exception:
+            self.log.exception(
+                "Could not parse event_schedule for session '%s' during day picker render",
+                handle.user.session_name,
+            )
+            await query.answer("Internal error, try again.", show_alert=True)
+            return
+
+        taken = {e["day"] for e in events if e["type"] == event_type}
+        available = [d for d in _DAY_ORDER if d not in taken]
+
         day_buttons = [
             InlineKeyboardButton(
                 day.capitalize(),
                 callback_data=f"sch:add:d:{event_type}:{day}",
             )
-            for day in _DAY_ORDER
+            for day in available
         ]
-        # Lay out 4 buttons in first row, 3 in second
-        markup = InlineKeyboardMarkup([
-            day_buttons[:4],
-            day_buttons[4:],
-            [InlineKeyboardButton("⬅ Back", callback_data="sch:add")],
-        ])
-        await query.message.edit_text(
-            f"Choose day for {event_type}:", reply_markup=markup
+
+        rows = []
+        if day_buttons:
+            rows.append(day_buttons[:4])
+            if len(day_buttons) > 4:
+                rows.append(day_buttons[4:])
+        rows.append([InlineKeyboardButton("⬅ Back", callback_data="sch:add")])
+
+        text = (
+            f"Choose day for {event_type}:"
+            if available
+            else f"All days are already scheduled for {event_type}."
         )
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(rows))
         await query.answer()
 
     async def _handle_add_day(
