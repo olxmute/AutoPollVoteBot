@@ -36,7 +36,7 @@ The bot uses a Jinja2-based configuration system for shared config, plus a SQLit
 - `DATABASE_PATH`: Path to the SQLite database (default: `users.db`)
 - `PORT`, `PING_URL`: Health check server settings
 - `ENABLE_SELF_PING`: Enable periodic self-ping (default: false)
-- `BOT_TOKEN`: Telegram Bot token for the manager bot (**required** — startup fails without it)
+- `BOT_TOKEN`: Telegram Bot token for the manager bot
 
 ### Per-user configuration (stored in SQLite `users` table)
 - `session_string`: Pyrogram session string for this user
@@ -82,7 +82,6 @@ The bot uses a Jinja2-based configuration system for shared config, plus a SQLit
    - Maintains a registry of `VoterHandle` objects keyed by Telegram user ID
    - Voter bots use `manager.app.send_message(...)` directly for vote notifications
    - Wires in `ScheduleEditor` on construction: `self._schedule_editor = ScheduleEditor(repo, self._handles)`
-   - Replaces the old REST-based `AutoPollNotifierBot`
 
 6. **VoterHandle** (`src/voter_handle.py`):
    - Two-field dataclass: `user: UserRecord`, `client: pyrogram.Client`
@@ -104,42 +103,51 @@ The bot uses a Jinja2-based configuration system for shared config, plus a SQLit
    - `apply_migrations(db_path)`: applies pending yoyo migrations at startup
 
 9. **User Repository** (`src/user_repository.py`):
-   - `UserRecord` dataclass: `id`, `session_name`, `session_string`, `event_schedule`, `vote_delay_seconds`, `telegram_user_id: Optional[int]`, `enabled: bool`
-   - `UserRecord.enabled` is **mutable runtime state**: hydrated from DB at startup (`True` for enabled rows), then mutated in-place by manager commands — no locks needed (single event loop)
-   - `UserRecord.event_schedule` is also **mutable runtime state**: mutated in-place by `ScheduleEditor` after every save; re-parsed by the voter on the next poll
-   - `UserRepository(db_path)` class: `get_enabled_users()`, `set_telegram_user_id(user_id, telegram_user_id)`, `set_enabled(telegram_user_id, enabled) -> int`, `set_event_schedule(telegram_user_id, dsl) -> int`
+   - `UserRecord` holds **mutable runtime state**: `enabled` and `event_schedule` are mutated in-place by manager
+     commands and `ScheduleEditor` — no locks needed (single event loop), and the voter picks up changes on the next
+     poll
+   - `UserRepository(db_path)`: `get_enabled_users()`, `set_telegram_user_id(user_id, telegram_user_id)`,
+     `set_enabled(telegram_user_id, enabled) -> int`, `set_event_schedule(telegram_user_id, dsl) -> int`
 
 ### Startup Sequence (`app.py`)
 
+Module scope (synchronous, pre-loop — only non-async setup):
 1. Load `CommonConfig` from `config.yaml.j2`
 2. Apply DB migrations (`apply_migrations`)
-3. Load enabled users (`repo.get_enabled_users()`); exit with error if none found
-4. Start `HealthCheckServer`
-5. Construct `AutoPollManagerBot` (requires `BOT_TOKEN`)
-6. Build one `AutoPollVoterBot` per user, passing `manager=manager_bot`
-7. Register all voter clients and the manager client with `health_server`
-8. `asyncio.run(main(...))` which:
-   - Starts each voter client (`await bot.app.start()`)
-   - For each voter: calls `get_me()`, upserts `telegram_user_id` in DB, mutates `bot.user.telegram_user_id`, registers `VoterHandle` in manager
-   - Starts manager client (`await manager_bot.app.start()`)
-   - Sets health server to healthy
-   - Blocks on `await asyncio.Event().wait()` until cancelled (SIGINT/KeyboardInterrupt)
-   - `finally`: stops manager first, then each voter
+3. Construct `UserRepository`
+4. Start `HealthCheckServer` (Flask on its own thread; loop-independent)
+5. `asyncio.run(main(common, repo, health_server))`
+
+Inside `main()` (all Pyrogram construction and async work happens here, so asyncio objects bind to the running loop —
+see note below):
+
+1. Construct `AutoPollManagerBot` (requires `BOT_TOKEN`)
+2. Load enabled users via `repo.get_enabled_users()`; raise `RuntimeError` if none (propagates to the module-scope
+   `except Exception`, which flips health to unhealthy)
+3. Build one `AutoPollVoterBot` per user, passing `manager=manager_bot`
+4. Register all voter clients and the manager client with `health_server`
+5. Start each voter client (`await bot.app.start()`); track started voters for safe cleanup
+6. For each voter: `get_me()`, upsert `telegram_user_id` in DB, mutate `bot.user.telegram_user_id`, register
+   `VoterHandle` in manager
+7. Start manager client (`await manager_bot.app.start()`)
+8. Set health server to healthy
+9. Block on `await asyncio.Event().wait()` until cancelled (SIGINT/KeyboardInterrupt)
+10. `finally`: stop manager first, then each started voter in reverse order
+
+**Why Pyrogram clients must be constructed inside `main()`**: `pyrogram.Client.__init__` binds internal asyncio
+primitives to whatever loop `asyncio.get_event_loop()` resolves at construction time. Constructing clients at module
+scope (before `asyncio.run()`) binds them to an implicit default loop; `asyncio.run()` then creates a **different**
+loop, causing `got Future ... attached to a different loop` at the first `await`. Do not "simplify" this by lifting
+construction back above `asyncio.run()`.
 
 ### Voting Logic Flow
 
-1. Bot receives new message in monitored forum
-2. Guard: if `self.user.enabled` is False, return immediately
-3. Filters for: correct chat + forum topic + poll message
-4. Fetches topic name using `get_forum_topic()`
-5. Parses topic name to extract event info
-6. Validates:
-   - Event date is in the future
-   - Event matches user's configured schedule (type, day, optional start_time)
-7. Checks if already voted (skip if yes)
-8. Selects poll option matching `vote_option` config
-9. Waits for user's configured delay, then votes
-10. Sends notification via `self.manager.app.send_message(chat_id=telegram_user_id, text=..., parse_mode=ParseMode.HTML)`
+1. Enabled guard: return immediately if `self.user.enabled` is False (checked before any work)
+2. Pyrogram filters (chat + forum topic + poll) → fetch topic name → parse into `EventInfo`
+3. Validate: event date strictly in the future AND matches schedule (type, day, optional start_time)
+4. Skip if poll already has `chosen_option_id`; otherwise pick option matching `vote_option`
+5. `await asyncio.sleep(vote_delay_seconds)` → `vote_poll(...)` → notify user via `self.manager.app.send_message(...)`
+   with `ParseMode.HTML`
 
 ### Configuration Rendering
 
@@ -147,37 +155,16 @@ The `yaml_renderer.py` module uses Jinja2 with a custom filter:
 - `parse_schedule_dsl`: Converts DSL string to YAML-compatible structure; exposed as a Jinja2 filter for legacy template compatibility; also called on every poll arrival in the voter (stateless re-parse replaces the old startup cache) and on every schedule save in `ScheduleEditor`
 - `serialize_schedule_dsl` (in `src/schedule_dsl.py`): inverse of the parser; called by `ScheduleEditor._save` to write the updated DSL back to DB
 - Templates have access to `env` object containing all environment variables
-- StrictUndefined mode ensures missing variables raise errors (including missing `BOT_TOKEN`)
+- StrictUndefined mode ensures missing variables raise errors
 
 ## File Structure
 
 ```
-app.py                          # Entry point
-src/
-  auto_poll_voter_bot.py        # Per-user voter client (stateless schedule re-parse per poll)
-  auto_poll_manager_bot.py      # Manager bot (commands + notifications; wires ScheduleEditor)
-  config.py                     # CommonConfig, ManagerBotConfig dataclasses
-  database.py                   # Migration runner
-  event_info_parser.py          # Topic name parser
-  health_check.py               # Flask health endpoint
-  schedule_dsl.py               # Schedule DSL parser + serialize_schedule_dsl
-  schedule_editor.py            # Inline-keyboard /schedule UI (Add / Remove flows)
-  user_repository.py            # UserRecord, UserRepository
-  voter_handle.py               # VoterHandle dataclass (extracted to break circular import)
-  yaml_renderer.py              # Jinja2 template renderer
-migrations/
-  0001_create_users.sql
-  0002_add_telegram_user_id.sql
-tests/
-  __init__.py
-  conftest.py
-  test_auto_poll_manager_bot.py
-  test_auto_poll_voter_bot.py
-  test_config.py
-  test_schedule_dsl.py          # serialize/parse roundtrip tests
-  test_schedule_editor.py       # ScheduleEditor handler + callback tests
-  test_user_repository.py
-config.yaml.j2                  # Jinja2 config template
+app.py                  # Entry point
+src/                    # See Architecture → Core Components for per-module responsibilities
+migrations/             # yoyo SQL migrations, numbered 0001_, 0002_, ...
+tests/                  # pytest suite (one test_*.py per src module)
+config.yaml.j2          # Jinja2 config template
 ```
 
 ## Important Notes
@@ -185,10 +172,5 @@ config.yaml.j2                  # Jinja2 config template
 - **Python environment**: use .venv to run python and its packages
 - **Session strings**: Generated separately with `python generate_session.py` and stored in the DB
 - **Forum-specific**: Bot only responds to messages in forum topics (not regular chats)
-- **Future events only**: Bot will not vote on events dated today or in the past
 - **Schedule matching**: If `start_time` is specified in schedule, event must match exactly; otherwise any time is accepted
-- **BOT_TOKEN required**: Startup fails immediately if `BOT_TOKEN` is not set (Jinja2 StrictUndefined raises)
-- **telegram_user_id backfill**: On first boot, each voter's `telegram_user_id` is populated automatically via `get_me()`; no manual entry needed
-- **Shared UserRecord**: The voter and its `VoterHandle` in the manager hold the same `UserRecord` object by reference — `/enable`/`/disable` mutations and schedule edits via `ScheduleEditor` are instantly visible to the voter on the next poll (no restart needed)
-- **No `/ping` handler**: The old Saved-Messages `/ping → pong` flow has been removed; use `/status` instead
 - **remember always update README.md and CLAUDE.md on functionality change**

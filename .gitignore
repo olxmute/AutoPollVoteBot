@@ -5,3 +5,8 @@
 config.yaml
 *.session
 *.db
+docs/plans
+build_docker.py
+generate_session.py
+get_user_id.py
+version.txt

@@ -7,9 +7,9 @@ from pyrogram.handlers import MessageHandler
 from pyrogram.types import Message
 
 from src.config import CommonConfig
+from src.schedule_editor import ScheduleEditor
 from src.user_repository import UserRepository
 from src.voter_handle import VoterHandle  # re-exported for backward compatibility
-from src.schedule_editor import ScheduleEditor
 
 # Re-export VoterHandle so existing ``from src.auto_poll_manager_bot import VoterHandle`` still works.
 __all__ = ["AutoPollManagerBot", "VoterHandle"]
@@ -55,17 +55,19 @@ class AutoPollManagerBot:
         self._schedule_editor = ScheduleEditor(repo, self._handles)
         self._schedule_editor.register_handlers(self.app)
 
-    async def _handle_enable(self, client, message: Message) -> None:
+    async def _handle_enable(self, message: Message) -> None:
         """Handle /enable command: resume autovoting for the sender."""
         await self._set_voting(message, True)
 
-    async def _handle_disable(self, client, message: Message) -> None:
+    async def _handle_disable(self, message: Message) -> None:
         """Handle /disable command: pause autovoting for the sender."""
         await self._set_voting(message, False)
 
     async def _set_voting(self, message: Message, enabled: bool) -> None:
         """Shared /enable and /disable body: flip the flag in DB and in-memory."""
         action = "enable" if enabled else "disable"
+        from_user_id = message.from_user.id if message.from_user else None
+        self.log.info("/%s requested by user_id=%s", action, from_user_id)
         try:
             handle = await self._get_handle_or_reject(message)
             if handle is None:
@@ -89,6 +91,12 @@ class AutoPollManagerBot:
                     action,
                 )
             handle.user.enabled = enabled
+            self.log.info(
+                "Autovoting %s for session '%s' (telegram_user_id=%d).",
+                action + "d",
+                handle.user.session_name,
+                telegram_user_id,
+            )
         except Exception:
             self.log.exception("Unexpected error in /%s handler.", action)
             await message.reply_text("Internal error, try again.")
@@ -97,8 +105,10 @@ class AutoPollManagerBot:
             f"Autovoting {'enabled' if enabled else 'disabled'}."
         )
 
-    async def _handle_status(self, client, message: Message) -> None:
+    async def _handle_status(self, message: Message) -> None:
         """Handle /status command: report voter liveness and voting state."""
+        from_user_id = message.from_user.id if message.from_user else None
+        self.log.info("/status requested by user_id=%s", from_user_id)
         try:
             handle = await self._get_handle_or_reject(message)
             if handle is None:
@@ -117,6 +127,12 @@ class AutoPollManagerBot:
                     voter_line = f"Voter: down ({type(e).__name__})"
 
             voting_line = f"Voting: {'enabled' if handle.user.enabled else 'disabled'}"
+            self.log.info(
+                "Status for session '%s': %s; %s.",
+                handle.user.session_name,
+                voter_line,
+                voting_line,
+            )
             await message.reply_text(f"{voter_line}\n{voting_line}")
         except Exception:
             self.log.exception("Unexpected error in /status handler.")

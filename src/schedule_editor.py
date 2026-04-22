@@ -70,10 +70,12 @@ class ScheduleEditor:
 
     async def _on_schedule_cmd(self, client: Client, message: Message) -> None:
         """Handle /schedule command: show the main schedule screen."""
-        handle = self._lookup_handle(message.from_user.id if message.from_user else None)
+        from_user_id = message.from_user.id if message.from_user else None
+        handle = self._lookup_handle(from_user_id)
         if handle is None:
             await message.reply_text("You're not registered. Contact the administrator.")
             return
+        self.log.info("/schedule opened by user_id=%s (session '%s').", from_user_id, handle.user.session_name)
         text, markup = self._build_main_screen(handle)
         await message.reply_text(text, reply_markup=markup)
 
@@ -262,6 +264,10 @@ class ScheduleEditor:
         events.append({"type": event_type, "day": day})
         saved = self._save(handle, events)
         if saved:
+            self.log.info(
+                "Added schedule entry '%s %s' for session '%s'.",
+                event_type, day, handle.user.session_name,
+            )
             text, markup = self._build_main_screen(handle)
             await query.message.edit_text(text, reply_markup=markup)
             await query.answer()
@@ -330,12 +336,16 @@ class ScheduleEditor:
             await self._render_remove_list(query, handle, answer=False)
             return
 
-        events.pop(index)
+        removed = events.pop(index)
         saved = self._save(handle, events)
         if not saved:
             await query.answer("Save failed, try again.", show_alert=True)
             await self._render_remove_list(query, handle, answer=False)
         else:
+            self.log.info(
+                "Removed schedule entry '%s %s' (index %d) for session '%s'.",
+                removed.get("type"), removed.get("day"), index, handle.user.session_name,
+            )
             await self._render_remove_list(query, handle)
 
     # ------------------------------------------------------------------
