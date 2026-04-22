@@ -6,7 +6,7 @@ from src.user_repository import UserRecord, UserRepository
 
 
 def _insert_user(db_path: str, session_name: str = "test_session",
-                 session_string: str = "sess_abc", event_schedule: str = "Game wed 20:30",
+                 session_string: str = "sess_abc", event_schedule: str = "Game wed",
                  vote_delay_seconds: int = 5, enabled: int = 1,
                  telegram_user_id: int | None = None) -> int:
     """Helper: insert a user row directly and return its id."""
@@ -34,7 +34,7 @@ class TestGetEnabledUsers:
         assert isinstance(u, UserRecord)
         assert u.session_name == "test_session"
         assert u.session_string == "sess_abc"
-        assert u.event_schedule == "Game wed 20:30"
+        assert u.event_schedule == "Game wed"
         assert u.vote_delay_seconds == 5
         assert u.telegram_user_id is None
         assert u.enabled is True
@@ -96,7 +96,7 @@ class TestSetTelegramUserId:
 class TestSetEventSchedule:
     def test_set_event_schedule_updates_row(self, tmp_db):
         """Insert a user with telegram_user_id set, call method, verify DB row and return == 1."""
-        _insert_user(tmp_db, telegram_user_id=42, event_schedule="Game wed 20:30")
+        _insert_user(tmp_db, telegram_user_id=42, event_schedule="Game wed")
         repo = UserRepository(tmp_db)
         rows = repo.set_event_schedule(42, "Training tue")
         assert rows == 1
@@ -122,12 +122,12 @@ class TestSetEventSchedule:
 
     def test_set_event_schedule_reflected_in_get_enabled_users(self, tmp_db):
         """Subsequent get_enabled_users() reflects the updated event_schedule."""
-        _insert_user(tmp_db, telegram_user_id=42, event_schedule="Game wed 20:30")
+        _insert_user(tmp_db, telegram_user_id=42, event_schedule="Game wed")
         repo = UserRepository(tmp_db)
-        repo.set_event_schedule(42, "Training tue; Game sat 11:00")
+        repo.set_event_schedule(42, "Training tue; Game sat")
         users = repo.get_enabled_users()
         assert len(users) == 1
-        assert users[0].event_schedule == "Training tue; Game sat 11:00"
+        assert users[0].event_schedule == "Training tue; Game sat"
 
 
 class TestSetEnabled:

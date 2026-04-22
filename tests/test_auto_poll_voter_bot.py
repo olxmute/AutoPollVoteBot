@@ -8,7 +8,6 @@ Covers:
   - send_vote_notification: logs warning and does NOT call manager.send_message when
     telegram_user_id is None
   - topic_name_matches: stateless re-parse of event_schedule on every call (Task 3)
-  - topic_name_matches: start_time filter works (Task 3)
   - topic_name_matches: empty schedule returns False (Task 3)
   - topic_name_matches: unparseable DSL logs and returns False (Task 3)
 """
@@ -35,7 +34,7 @@ def _make_common() -> CommonConfig:
         pyrogram=PyrogramConfig(api_id=12345, api_hash="deadbeef"),
         group=GroupConfig(chat_id=-100, vote_option="Go!"),
         database=DatabaseConfig(path=":memory:"),
-        server=ServerConfig(port=8080, ping_url="http://localhost/ping", enable_self_ping=False),
+        server=ServerConfig(port=8080),
         manager=ManagerBotConfig(bot_token="bot:TOKEN"),
     )
 
@@ -49,7 +48,7 @@ def _make_user(
         id=1,
         session_name=session_name,
         session_string="SESS",
-        event_schedule="Game wed 20:30",
+        event_schedule="Game wed",
         vote_delay_seconds=0,
         telegram_user_id=telegram_user_id,
         enabled=enabled,
@@ -316,28 +315,6 @@ class TestTopicNameMatchesStatelessReParse:
 
         # Now the schedule matches
         assert voter.topic_name_matches("Game 2099-01-05, Wed, 20:00-22:00") is True
-
-    def test_start_time_filter_matches_exact_time(self):
-        """With 'Game wed 20:30', matcher returns True for a topic with start_time 20:30."""
-        voter = self._make_voter_with_schedule("Game wed 20:30")
-
-        future_wed = date(2099, 1, 5)
-        voter.event_info_parser.parse_line.return_value = _make_event_info(
-            event_type="Game", event_date=future_wed, weekday="Wed", start_time=time(20, 30)
-        )
-
-        assert voter.topic_name_matches("Game 2099-01-05, Wed, 20:30-22:00") is True
-
-    def test_start_time_filter_rejects_different_time(self):
-        """With 'Game wed 20:30', matcher returns False for a topic with start_time 20:00."""
-        voter = self._make_voter_with_schedule("Game wed 20:30")
-
-        future_wed = date(2099, 1, 5)
-        voter.event_info_parser.parse_line.return_value = _make_event_info(
-            event_type="Game", event_date=future_wed, weekday="Wed", start_time=time(20, 0)
-        )
-
-        assert voter.topic_name_matches("Game 2099-01-05, Wed, 20:00-22:00") is False
 
     def test_empty_schedule_returns_false(self):
         """With empty event_schedule, topic_name_matches returns False for any topic."""

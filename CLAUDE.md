@@ -34,14 +34,13 @@ The bot uses a Jinja2-based configuration system for shared config, plus a SQLit
 - `GROUP_CHAT_ID`: Target forum chat ID to monitor
 - `GROUP_VOTE_OPTION`: Text of poll option to vote for (e.g., "Go!")
 - `DATABASE_PATH`: Path to the SQLite database (default: `users.db`)
-- `PORT`, `PING_URL`: Health check server settings
-- `ENABLE_SELF_PING`: Enable periodic self-ping (default: false)
+- `PORT`: Health check server settings
 - `BOT_TOKEN`: Telegram Bot token for the manager bot
 
 ### Per-user configuration (stored in SQLite `users` table)
 - `session_string`: Pyrogram session string for this user
 - `session_name`: Unique name for this Pyrogram client
-- `event_schedule`: DSL string defining when to vote (format: `Type day [HH:MM]; ...`)
+- `event_schedule`: DSL string defining when to vote (format: `Type day; ...`)
 - `vote_delay_seconds`: Delay before voting (default: 5)
 - `enabled`: Whether autovoting is active for this user (0/1); mutable at runtime via `/enable`/`/disable`
 - `telegram_user_id`: Telegram user ID, populated automatically on first startup via `get_me()` backfill
@@ -66,15 +65,15 @@ The bot uses a Jinja2-based configuration system for shared config, plus a SQLit
 
 3. **Schedule DSL** (`src/schedule_dsl.py`):
    - Parses schedule configuration strings
-   - Format: `Type day [HH:MM]; Type day [HH:MM]; ...`
-   - Example: `Game wed 20:30; Game sat 11:00; Training tue`
+   - Format: `Type day; Type day; ...`
+   - Example: `Game wed; Game sat; Training tue`
    - Returns a list of dicts (converted to `ScheduledEvent` objects by `AutoPollVoterBot`)
+   - **Strict 2-token validation**: each entry must contain exactly two whitespace-separated tokens (`Type day`); entries with != 2 tokens (including 1-token or 3-token entries like `Game wed 20:30`) raise `ValueError`
 
 4. **Health Check Server** (`src/health_check.py`):
    - Flask server running on separate thread
    - Endpoint: `GET /health` (returns 200 OK or 503 unhealthy)
    - Multi-client: use `register_client(client)` for each bot; reports all N clients
-   - Optional self-ping functionality (disabled by default, enable via `ENABLE_SELF_PING`)
 
 5. **AutoPollManagerBot** (`src/auto_poll_manager_bot.py`):
    - Telegram bot that lets registered users manage their autovoting config via DM commands
@@ -144,7 +143,7 @@ construction back above `asyncio.run()`.
 
 1. Enabled guard: return immediately if `self.user.enabled` is False (checked before any work)
 2. Pyrogram filters (chat + forum topic + poll) → fetch topic name → parse into `EventInfo`
-3. Validate: event date strictly in the future AND matches schedule (type, day, optional start_time)
+3. Validate: event date strictly in the future AND matches schedule (type, day)
 4. Skip if poll already has `chosen_option_id`; otherwise pick option matching `vote_option`
 5. `await asyncio.sleep(vote_delay_seconds)` → `vote_poll(...)` → notify user via `self.manager.app.send_message(...)`
    with `ParseMode.HTML`
@@ -172,5 +171,7 @@ config.yaml.j2          # Jinja2 config template
 - **Python environment**: use .venv to run python and its packages
 - **Session strings**: Generated separately with `python generate_session.py` and stored in the DB
 - **Forum-specific**: Bot only responds to messages in forum topics (not regular chats)
-- **Schedule matching**: If `start_time` is specified in schedule, event must match exactly; otherwise any time is accepted
+- **Unused-but-required parameters**: prefix with `_` (e.g., `_client`) when a parameter is mandated by a framework
+  contract (such as Pyrogram handler callbacks, which are invoked as `callback(client, update)`) but the body doesn't
+  use it
 - **remember always update README.md and CLAUDE.md on functionality change**

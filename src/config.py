@@ -1,6 +1,4 @@
 from dataclasses import dataclass
-from datetime import time
-from typing import Optional
 
 from dataclass_wizard import YAMLWizard
 
@@ -23,12 +21,6 @@ class GroupConfig:
 class ScheduledEvent:
     type: str
     day: str
-    start_time: Optional[time] = None  # Parsed from "HH:MM" string
-
-    def __post_init__(self):
-        # Convert string to time if needed (for flexibility)
-        if isinstance(self.start_time, str):
-            self.start_time = time.fromisoformat(self.start_time)
 
 
 @dataclass
@@ -39,8 +31,6 @@ class DatabaseConfig:
 @dataclass
 class ServerConfig:
     port: int
-    ping_url: str
-    enable_self_ping: bool
 
 
 @dataclass

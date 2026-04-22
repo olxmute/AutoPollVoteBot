@@ -21,7 +21,7 @@ def _make_user_record(
     tg_id: Optional[int] = 111,
     enabled: bool = True,
     db_id: int = 1,
-    event_schedule: str = "Game wed 20:30",
+    event_schedule: str = "Game wed",
 ) -> UserRecord:
     return UserRecord(
         id=db_id,
@@ -105,7 +105,7 @@ class TestRegisterHandlers:
 class TestScheduleCommand:
     def test_schedule_command_renders_main_with_events(self):
         """Registered user with non-empty DSL gets text with Add+Remove+Close."""
-        user = _make_user_record(tg_id=111, event_schedule="Game wed 20:30")
+        user = _make_user_record(tg_id=111, event_schedule="Game wed")
         handle = _make_voter_handle(user)
         handles = {111: handle}
         editor = _make_editor(handles=handles)
@@ -318,7 +318,7 @@ class TestCloseCallback:
 class TestMainCallback:
     def test_main_callback_redraws_via_edit_text(self):
         """sch:main callback re-renders schedule via edit_text."""
-        user = _make_user_record(tg_id=111, event_schedule="Game wed 20:30")
+        user = _make_user_record(tg_id=111, event_schedule="Game wed")
         handle = _make_voter_handle(user)
         handles = {111: handle}
         editor = _make_editor(handles=handles)
@@ -546,21 +546,6 @@ class TestAddFlow:
         repo.set_event_schedule.assert_called_once_with(111, "Game wed")
         assert handle.user.event_schedule == "Game wed"
 
-    def test_add_preserves_existing_time_bearing_entries(self):
-        """Starting from 'Game wed 20:30', add 'Training tue' → both entries intact."""
-        user = _make_user_record(tg_id=111, event_schedule="Game wed 20:30")
-        handle = _make_voter_handle(user)
-        handles = {111: handle}
-        repo = _make_repo()
-        editor = _make_editor(handles=handles, repo=repo)
-        query = _make_query(from_user_id=111, data="sch:add:d:Training:tue")
-
-        asyncio.run(editor._on_callback(None, query))
-
-        expected_dsl = "Game wed 20:30; Training tue"
-        repo.set_event_schedule.assert_called_once_with(111, expected_dsl)
-        assert handle.user.event_schedule == expected_dsl
-
     def test_add_day_unknown_day_rejected(self):
         """sch:add:d:Game:xyz → alert 'Internal error, try again.', no mutation."""
         user = _make_user_record(tg_id=111, event_schedule="Game wed")
@@ -609,7 +594,7 @@ class TestRemoveFlow:
         """sch:rm with 3 events → edit_text with 3 numbered rows + Back."""
         user = _make_user_record(
             tg_id=111,
-            event_schedule="Game wed 20:30; Training tue; Game sat",
+            event_schedule="Game wed; Training tue; Game sat",
         )
         handle = _make_voter_handle(user)
         handles = {111: handle}

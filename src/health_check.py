@@ -1,9 +1,7 @@
 import logging
 import threading
-import time
 from typing import List, TYPE_CHECKING
 
-import requests
 from flask import Flask, jsonify
 
 from src.config import CommonConfig
@@ -17,12 +15,11 @@ log = logging.getLogger("health_check")
 class HealthCheckServer:
     """Simple HTTP server for health checks"""
 
-    def __init__(self, config: CommonConfig, ping_interval: int = 20):
+    def __init__(self, config: CommonConfig):
         self.config = config
         self.app = Flask(__name__)
         self.is_healthy = True
         self.status_message = "OK"
-        self.ping_interval = ping_interval
         self._clients: List['Client'] = []
         self._setup_routes()
         self.server_thread = None
@@ -58,21 +55,6 @@ class HealthCheckServer:
         self.is_healthy = is_healthy
         self.status_message = message
 
-    def _self_ping_loop(self):
-        """Periodically ping the health endpoint"""
-        # Wait for server to start
-        time.sleep(2)
-
-        url = f"{self.config.server.ping_url}/health"
-        log.info(f"Starting self-ping loop every {self.ping_interval} seconds")
-
-        while True:
-            time.sleep(self.ping_interval)
-            try:
-                requests.get(url, timeout=5)
-            except Exception:
-                pass  # Ignore errors
-
     def start(self):
         """Start the health check server in a background thread"""
 
@@ -83,10 +65,3 @@ class HealthCheckServer:
         self.server_thread = threading.Thread(target=run_server, daemon=True)
         self.server_thread.start()
         log.info(f"Health check server started on http://0.0.0.0:{self.config.server.port}/health")
-
-        # Start self-ping if enabled
-        if self.config.server.enable_self_ping:
-            log.info("Self-ping enabled")
-            threading.Thread(target=self._self_ping_loop, daemon=True).start()
-        else:
-            log.info("Self-ping disabled")
