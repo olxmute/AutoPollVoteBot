@@ -60,7 +60,7 @@ class AutoPollVoterBot:
         Accept topic names that:
           - parse into a valid EventInfo,
           - have event_date in the future (strictly greater than today).
-          - match at least one scheduled event (type, day, and optionally start_time).
+          - match at least one scheduled event (type, day).
 
         Re-parses self.user.event_schedule on every call so that schedule edits
         made via ScheduleEditor are immediately visible without a restart.
@@ -88,17 +88,8 @@ class AutoPollVoterBot:
 
         for scheduled in events:
             if scheduled.type.lower() == event_type and scheduled.day.lower() == weekday:
-                # If start_time is configured, it must match
-                if scheduled.start_time is not None:
-                    if event_info.start_time != scheduled.start_time:
-                        self.log.info(
-                            "Topic '%s' matches type and day but start_time differs (expected %s, got %s); skipping.",
-                            name, scheduled.start_time, event_info.start_time
-                        )
-                        continue
-
-                self.log.info("Topic '%s' matches schedule (type=%s, day=%s, start_time=%s).",
-                         name, scheduled.type, scheduled.day, scheduled.start_time or "any")
+                self.log.info("Topic '%s' matches schedule (type=%s, day=%s).",
+                         name, scheduled.type, scheduled.day)
                 return True
 
         self.log.info("Topic '%s' doesn't match any scheduled event; skipping.", name)

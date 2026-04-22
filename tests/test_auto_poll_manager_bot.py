@@ -23,7 +23,7 @@ def _make_common() -> CommonConfig:
         pyrogram=PyrogramConfig(api_id=12345, api_hash="deadbeef"),
         group=GroupConfig(chat_id=-100, vote_option="Go!"),
         database=DatabaseConfig(path=":memory:"),
-        server=ServerConfig(port=8080, ping_url="http://localhost/ping", enable_self_ping=False),
+        server=ServerConfig(port=8080),
         manager=ManagerBotConfig(bot_token="bot:TOKEN"),
     )
 
@@ -37,7 +37,7 @@ def _make_user_record(
         id=db_id,
         session_name="alice",
         session_string="SESS",
-        event_schedule="Game wed 20:30",
+        event_schedule="Game wed",
         vote_delay_seconds=5,
         telegram_user_id=tg_id,
         enabled=enabled,
@@ -548,7 +548,6 @@ class TestScheduleEditorWiring:
         the first three calls must be MessageHandlers for enable/disable/status
         (in order), and the schedule-editor handlers come after.
         """
-        from pyrogram.handlers import MessageHandler, CallbackQueryHandler
 
         common = _make_common()
         repo = _make_repo()

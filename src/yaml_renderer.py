@@ -2,8 +2,6 @@ import os
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateError
 
-from src.schedule_dsl import parse_schedule_dsl
-
 
 def _jinja_env(base_dir: str = ".") -> Environment:
     """Strict Jinja2 env: undefined vars raise errors."""
@@ -14,9 +12,6 @@ def _jinja_env(base_dir: str = ".") -> Environment:
         trim_blocks=True,
         lstrip_blocks=True,
     )
-
-    # Register custom filters
-    env.filters['parse_schedule_dsl'] = parse_schedule_dsl
 
     return env
 

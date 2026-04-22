@@ -6,7 +6,7 @@ multiple users concurrently via a SQLite-backed user database.
 ## Features
 
 - Monitors Telegram forum topics for new polls
-- Automatically votes based on event schedules (type, day, start time)
+- Automatically votes based on event schedules (type, day)
 - Parses event information from topic names
 - Only votes on future events that match configured schedules
 - Multi-user support: run N Pyrogram clients concurrently
@@ -59,9 +59,7 @@ GROUP_VOTE_OPTION=Go!
 DATABASE_PATH=users.db  # optional, defaults to users.db
 
 # Server settings
-PING_URL=http://localhost:8080  # or your server URL
 PORT=8080
-ENABLE_SELF_PING=false  # Set to true to enable periodic self-ping
 
 # Manager bot (required)
 BOT_TOKEN=your_bot_token_here  # Required: Telegram Bot token for the manager bot
@@ -77,8 +75,6 @@ BOT_TOKEN=your_bot_token_here  # Required: Telegram Bot token for the manager bo
 | `GROUP_VOTE_OPTION` | No       | `Go!`      | Text of the poll option to vote for                |
 | `DATABASE_PATH`     | No       | `users.db` | Path to the SQLite database file                   |
 | `PORT`              | No       | `8080`     | Port for the health check server                   |
-| `PING_URL`          | No       | `""`       | URL for self-ping health checks                    |
-| `ENABLE_SELF_PING`  | No       | `false`    | Enable periodic self-ping to keep service alive    |
 | `BOT_TOKEN`         | **Yes**  | -          | Telegram Bot token for the manager bot (required)  |
 
 > **Note:** `BOT_TOKEN` is **required**. Startup will fail immediately if it is not set.
@@ -96,7 +92,7 @@ CREATE TABLE users
    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
    session_name       TEXT UNIQUE NOT NULL,
    session_string     TEXT        NOT NULL,
-   event_schedule     TEXT        NOT NULL, -- DSL string, e.g. "Game wed 20:30; Training tue"
+   event_schedule     TEXT        NOT NULL, -- DSL string, e.g. "Game wed; Training tue"
    vote_delay_seconds INTEGER     NOT NULL DEFAULT 5,
    enabled            BOOLEAN     NOT NULL DEFAULT 1,
    telegram_user_id   INTEGER              -- populated automatically on first startup
@@ -113,7 +109,7 @@ discover its Telegram account and upserts the value. No manual data entry is nee
 ### Adding users manually
 
 ```bash
-sqlite3 users.db "INSERT INTO users (session_name, session_string, event_schedule, vote_delay_seconds) VALUES ('user1', 'your_session_string', 'Game wed 20:30; Training tue', 5);"
+sqlite3 users.db "INSERT INTO users (session_name, session_string, event_schedule, vote_delay_seconds) VALUES ('user1', 'your_session_string', 'Game wed; Training tue', 5);"
 ```
 
 - `session_name` — unique identifier for the Pyrogram client (arbitrary string)
@@ -127,14 +123,14 @@ sqlite3 users.db "INSERT INTO users (session_name, session_string, event_schedul
 The `event_schedule` field uses a DSL format:
 
 ```
-Game wed; Game sat 11:00; Training tue
+Game wed; Game sat; Training tue
 ```
 
 This configures the bot to vote on:
 
-- Game events on Wednesday (at any time)
-- Game events on Saturday at 11:00
-- Training events on Tuesday (at any time)
+- Game events on Wednesday
+- Game events on Saturday
+- Training events on Tuesday
 
 ## Manager Bot Commands
 
@@ -167,7 +163,7 @@ The `/schedule` command opens an inline keyboard that lets you view, add, and re
 
 ```
 Your schedule:
-1. Game wed 20:30
+1. Game wed
 2. Training tue
 
 [➕ Add]  [❌ Remove]  [✖ Close]
@@ -180,7 +176,7 @@ Your schedule:
 
 1. Tap `[➕ Add]` → choose event type: `[🏐 Game]` or `[🏃 Training]`
 2. Choose a weekday (Mon–Sun)
-3. Entry is appended (no start time — time-less entry matches any poll at that day)
+3. Entry is appended
 4. Main screen is redrawn with the new entry
 
 **Remove flow:**

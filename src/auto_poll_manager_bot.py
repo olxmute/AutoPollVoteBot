@@ -55,11 +55,11 @@ class AutoPollManagerBot:
         self._schedule_editor = ScheduleEditor(repo, self._handles)
         self._schedule_editor.register_handlers(self.app)
 
-    async def _handle_enable(self, message: Message) -> None:
+    async def _handle_enable(self, _client: Client, message: Message) -> None:
         """Handle /enable command: resume autovoting for the sender."""
         await self._set_voting(message, True)
 
-    async def _handle_disable(self, message: Message) -> None:
+    async def _handle_disable(self, _client: Client, message: Message) -> None:
         """Handle /disable command: pause autovoting for the sender."""
         await self._set_voting(message, False)
 
@@ -105,7 +105,7 @@ class AutoPollManagerBot:
             f"Autovoting {'enabled' if enabled else 'disabled'}."
         )
 
-    async def _handle_status(self, message: Message) -> None:
+    async def _handle_status(self, _client: Client, message: Message) -> None:
         """Handle /status command: report voter liveness and voting state."""
         from_user_id = message.from_user.id if message.from_user else None
         self.log.info("/status requested by user_id=%s", from_user_id)

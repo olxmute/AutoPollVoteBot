@@ -68,7 +68,7 @@ class ScheduleEditor:
     # /schedule command
     # ------------------------------------------------------------------
 
-    async def _on_schedule_cmd(self, client: Client, message: Message) -> None:
+    async def _on_schedule_cmd(self, _client: Client, message: Message) -> None:
         """Handle /schedule command: show the main schedule screen."""
         from_user_id = message.from_user.id if message.from_user else None
         handle = self._lookup_handle(from_user_id)
@@ -116,8 +116,6 @@ class ScheduleEditor:
         lines = []
         for i, e in enumerate(events, start=1):
             entry = f"{e['type']} {e['day']}"
-            if e.get("start_time"):
-                entry += f" {e['start_time']}"
             lines.append(f"{i}. {entry}")
         text = "Your schedule:\n" + "\n".join(lines)
         markup = InlineKeyboardMarkup([
@@ -133,7 +131,7 @@ class ScheduleEditor:
     # Callback dispatcher
     # ------------------------------------------------------------------
 
-    async def _on_callback(self, client: Client, query: CallbackQuery) -> None:
+    async def _on_callback(self, _client: Client, query: CallbackQuery) -> None:
         """Dispatch all sch:* callback_data to the appropriate handler."""
         try:
             handle = self._lookup_handle(query.from_user.id if query.from_user else None)
@@ -304,8 +302,6 @@ class ScheduleEditor:
             text = "Tap an entry to remove it:"
             for i, e in enumerate(events):
                 label = f"{i + 1}. {e['type']} {e['day']}"
-                if e.get("start_time"):
-                    label += f" {e['start_time']}"
                 rows.append([InlineKeyboardButton(label, callback_data=f"sch:rm:{i}")])
 
         rows.append([InlineKeyboardButton("⬅ Back", callback_data="sch:main")])
