@@ -175,7 +175,8 @@ Your schedule:
 **Add flow:**
 
 1. Tap `[➕ Add]` → choose event type: `[🏐 Game]` or `[🏃 Training]`
-2. Choose a weekday (Mon–Sun)
+2. Choose a weekday — only days not already scheduled for the chosen type are shown (so each `(type, day)` pair stays
+   unique). If every day is already taken for that type, a message explains there's nothing left to add.
 3. Entry is appended
 4. Main screen is redrawn with the new entry
 

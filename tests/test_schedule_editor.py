@@ -4,9 +4,7 @@ All Pyrogram types are mocked — no disk or network access.
 """
 import asyncio
 from typing import Optional
-from unittest.mock import AsyncMock, MagicMock, patch, call
-
-import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from src.auto_poll_manager_bot import VoterHandle
 from src.schedule_editor import ScheduleEditor
@@ -518,20 +516,6 @@ class TestAddFlow:
         # In-memory must NOT be mutated — split-brain would occur otherwise
         assert handle.user.event_schedule == original_schedule
 
-    def test_add_duplicate_entry_appended_as_separate_row(self):
-        """Starting from 'Game wed', adding Game+wed again produces 'Game wed; Game wed'."""
-        user = _make_user_record(tg_id=111, event_schedule="Game wed")
-        handle = _make_voter_handle(user)
-        handles = {111: handle}
-        repo = _make_repo()
-        editor = _make_editor(handles=handles, repo=repo)
-        query = _make_query(from_user_id=111, data="sch:add:d:Game:wed")
-
-        asyncio.run(editor._on_callback(None, query))
-
-        repo.set_event_schedule.assert_called_once_with(111, "Game wed; Game wed")
-        assert handle.user.event_schedule == "Game wed; Game wed"
-
     def test_add_on_empty_schedule_produces_single_entry_dsl(self):
         """Starting from empty DSL, add 'Game wed' → DSL is exactly 'Game wed'."""
         user = _make_user_record(tg_id=111, event_schedule="")
@@ -583,6 +567,102 @@ class TestAddFlow:
         assert show_alert is True
         repo.set_event_schedule.assert_not_called()
         assert handle.user.event_schedule == "Game wed"  # unchanged
+
+
+# ---------------------------------------------------------------------------
+# Tests: unique-day filter in add-day picker
+# ---------------------------------------------------------------------------
+
+
+def _collect_button_datas(markup):
+    datas = []
+    if markup and hasattr(markup, "inline_keyboard"):
+        for row in markup.inline_keyboard:
+            for btn in row:
+                datas.append(btn.callback_data)
+    return datas
+
+
+class TestUniqueDayPicker:
+    def test_day_picker_excludes_taken_day_for_same_type(self):
+        """Schedule 'Game wed' → picking Game shows 6 days, no wed."""
+        user = _make_user_record(tg_id=111, event_schedule="Game wed")
+        handle = _make_voter_handle(user)
+        handles = {111: handle}
+        editor = _make_editor(handles=handles)
+        query = _make_query(from_user_id=111, data="sch:add:t:Game")
+
+        asyncio.run(editor._on_callback(None, query))
+
+        edit_call = query.message.edit_text.call_args
+        markup = edit_call.kwargs.get("reply_markup") or (
+            edit_call.args[1] if len(edit_call.args) > 1 else None
+        )
+        datas = _collect_button_datas(markup)
+        day_datas = [d for d in datas if d.startswith("sch:add:d:Game:")]
+        assert len(day_datas) == 6, f"Expected 6 day buttons, got: {day_datas}"
+        assert "sch:add:d:Game:wed" not in day_datas
+
+    def test_day_picker_includes_day_taken_for_other_type(self):
+        """Schedule 'Game wed' → picking Training still offers wed."""
+        user = _make_user_record(tg_id=111, event_schedule="Game wed")
+        handle = _make_voter_handle(user)
+        handles = {111: handle}
+        editor = _make_editor(handles=handles)
+        query = _make_query(from_user_id=111, data="sch:add:t:Training")
+
+        asyncio.run(editor._on_callback(None, query))
+
+        edit_call = query.message.edit_text.call_args
+        markup = edit_call.kwargs.get("reply_markup") or (
+            edit_call.args[1] if len(edit_call.args) > 1 else None
+        )
+        datas = _collect_button_datas(markup)
+        day_datas = [d for d in datas if d.startswith("sch:add:d:Training:")]
+        assert len(day_datas) == 7, f"Expected 7 day buttons, got: {day_datas}"
+        assert "sch:add:d:Training:wed" in day_datas
+
+    def test_day_picker_all_days_taken_shows_explanation(self):
+        """All 7 Games scheduled → picker shows no day buttons, only Back, with explanation text."""
+        dsl = "; ".join(f"Game {d}" for d in ["mon", "tue", "wed", "thu", "fri", "sat", "sun"])
+        user = _make_user_record(tg_id=111, event_schedule=dsl)
+        handle = _make_voter_handle(user)
+        handles = {111: handle}
+        editor = _make_editor(handles=handles)
+        query = _make_query(from_user_id=111, data="sch:add:t:Game")
+
+        asyncio.run(editor._on_callback(None, query))
+
+        edit_call = query.message.edit_text.call_args
+        text = edit_call.args[0] if edit_call.args else edit_call.kwargs.get("text", "")
+        markup = edit_call.kwargs.get("reply_markup") or (
+            edit_call.args[1] if len(edit_call.args) > 1 else None
+        )
+        datas = _collect_button_datas(markup)
+
+        day_datas = [d for d in datas if d.startswith("sch:add:d:Game:")]
+        assert day_datas == [], f"Expected no day buttons, got: {day_datas}"
+        assert "already scheduled" in text.lower()
+        # Back button still present
+        assert "sch:add" in datas
+
+    def test_day_picker_parse_failure_alerts(self):
+        """Malformed event_schedule → alert, no edit_text."""
+        user = _make_user_record(tg_id=111, event_schedule="x")
+        handle = _make_voter_handle(user)
+        handles = {111: handle}
+        editor = _make_editor(handles=handles)
+        query = _make_query(from_user_id=111, data="sch:add:t:Game")
+
+        asyncio.run(editor._on_callback(None, query))
+
+        query.answer.assert_awaited_once()
+        answer_call = query.answer.call_args
+        text = answer_call.args[0] if answer_call.args else answer_call.kwargs.get("text", "")
+        show_alert = answer_call.kwargs.get("show_alert", False)
+        assert "internal error" in text.lower()
+        assert show_alert is True
+        query.message.edit_text.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

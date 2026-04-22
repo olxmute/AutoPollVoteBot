@@ -92,7 +92,9 @@ The bot uses a Jinja2-based configuration system for shared config, plus a SQLit
    - Owns the entire `/schedule` inline-keyboard UI: command handler + all `sch:*` callback routes
    - Constructor: `(repo: UserRepository, handles: Dict[int, VoterHandle])`; the dict is passed by reference so newly-registered voters are visible immediately
    - `register_handlers(app)` registers one `MessageHandler` (for `/schedule`) and one `CallbackQueryHandler` (for `^sch:` callbacks)
-   - Add flow: `/schedule` → `[Add]` → type picker (Game / Training) → day picker (Mon–Sun) → entry appended, DSL saved, main screen redrawn
+   - Add flow: `/schedule` → `[Add]` → type picker (Game / Training) → day picker (only days not already scheduled for
+     the chosen type — enforces `(type, day)` uniqueness; shows "All days are already scheduled for {Type}." + Back when
+     nothing is left) → entry appended, DSL saved, main screen redrawn
    - Remove flow: `[Remove]` → numbered list of current entries → tap any → entry removed, list redrawn (stays on remove screen)
    - `Close` dismisses the keyboard; `Back` always returns one level up
    - Persists via `repo.set_event_schedule(telegram_user_id, new_dsl)` and immediately mutates `handle.user.event_schedule`; mutation propagates to voter via the shared `UserRecord` reference
