@@ -44,7 +44,7 @@ class ServerConfig:
 
 
 @dataclass
-class NotificationConfig:
+class ManagerBotConfig:
     bot_token: str
 
 
@@ -54,7 +54,7 @@ class CommonConfig(YAMLWizard):
     group: GroupConfig
     database: DatabaseConfig
     server: ServerConfig
-    notification: Optional[NotificationConfig] = None
+    manager: ManagerBotConfig
 
 
 def load_config_from_template(template_path: str) -> CommonConfig:

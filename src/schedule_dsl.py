@@ -1,6 +1,27 @@
 from typing import List
 
 
+def serialize_schedule_dsl(events: List[dict]) -> str:
+    """
+    Inverse of parse_schedule_dsl. Converts a list of event dicts to a DSL string.
+
+    Input dicts must match parse output shape:
+    {'type': str, 'day': str, 'start_time': str (optional)}.
+    start_time is a string like 'HH:MM' — NOT a datetime.time. Callers that hold
+    ScheduledEvent instances must not asdict() them here (the time coercion in
+    __post_init__ would produce 'HH:MM:SS' and break the roundtrip).
+
+    Returns empty string for empty input.
+    """
+    parts = []
+    for e in events:
+        entry = f"{e['type']} {e['day']}"
+        if e.get('start_time'):
+            entry += f" {e['start_time']}"
+        parts.append(entry)
+    return "; ".join(parts)
+
+
 def parse_schedule_dsl(dsl_string: str) -> List[dict]:
     """
     Parse a schedule DSL string into a list of event dictionaries.

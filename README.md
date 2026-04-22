@@ -9,7 +9,8 @@ multiple users concurrently via a SQLite-backed user database.
 - Automatically votes based on event schedules (type, day, start time)
 - Parses event information from topic names
 - Only votes on future events that match configured schedules
-- Multi-user support: run N Pyrogram clients concurrently via `pyrogram.compose`
+- Multi-user support: run N Pyrogram clients concurrently
+- Manager bot for per-user configuration via Telegram DM commands
 - Health check endpoint reporting all client connection states
 - Docker support
 
@@ -17,6 +18,7 @@ multiple users concurrently via a SQLite-backed user database.
 
 - Python 3.11+
 - Telegram API credentials (API ID and API Hash)
+- Telegram Bot token (`BOT_TOKEN`) for the manager/notification bot
 - SQLite database with at least one enabled user row
 
 ## Installation
@@ -61,8 +63,8 @@ PING_URL=http://localhost:8080  # or your server URL
 PORT=8080
 ENABLE_SELF_PING=false  # Set to true to enable periodic self-ping
 
-# Notification settings (optional)
-BOT_TOKEN=your_bot_token_here  # Optional: Telegram Bot token for notifications
+# Manager bot (required)
+BOT_TOKEN=your_bot_token_here  # Required: Telegram Bot token for the manager bot
 ```
 
 ### Environment Variables
@@ -75,9 +77,11 @@ BOT_TOKEN=your_bot_token_here  # Optional: Telegram Bot token for notifications
 | `GROUP_VOTE_OPTION` | No       | `Go!`      | Text of the poll option to vote for                |
 | `DATABASE_PATH`     | No       | `users.db` | Path to the SQLite database file                   |
 | `PORT`              | No       | `8080`     | Port for the health check server                   |
-| `PING_URL`          | Yes      | -          | URL for self-ping health checks                    |
+| `PING_URL`          | No       | `""`       | URL for self-ping health checks                    |
 | `ENABLE_SELF_PING`  | No       | `false`    | Enable periodic self-ping to keep service alive    |
-| `BOT_TOKEN`         | No       | -          | Telegram Bot token for sending vote notifications  |
+| `BOT_TOKEN`         | **Yes**  | -          | Telegram Bot token for the manager bot (required)  |
+
+> **Note:** `BOT_TOKEN` is **required**. Startup will fail immediately if it is not set.
 
 ## Database
 
@@ -94,9 +98,17 @@ CREATE TABLE users
    session_string     TEXT        NOT NULL,
    event_schedule     TEXT        NOT NULL, -- DSL string, e.g. "Game wed 20:30; Training tue"
    vote_delay_seconds INTEGER     NOT NULL DEFAULT 5,
-   enabled            BOOLEAN     NOT NULL DEFAULT 1
+   enabled            BOOLEAN     NOT NULL DEFAULT 1,
+   telegram_user_id   INTEGER              -- populated automatically on first startup
 );
+
+-- Partial unique index: allows multiple NULLs but prevents two rows sharing the same Telegram ID
+CREATE UNIQUE INDEX idx_users_telegram_user_id
+    ON users(telegram_user_id) WHERE telegram_user_id IS NOT NULL;
 ```
+
+The `telegram_user_id` column is populated automatically on first startup: each enabled voter calls `get_me()` to
+discover its Telegram account and upserts the value. No manual data entry is needed.
 
 ### Adding users manually
 
@@ -123,6 +135,63 @@ This configures the bot to vote on:
 - Game events on Wednesday (at any time)
 - Game events on Saturday at 11:00
 - Training events on Tuesday (at any time)
+
+## Manager Bot Commands
+
+Each registered user can DM the bot to manage their autovoting configuration:
+
+| Command      | Description                                                   |
+|--------------|---------------------------------------------------------------|
+| `/enable`    | Resume autovoting (sets `enabled = 1` in DB)                  |
+| `/disable`   | Pause autovoting (sets `enabled = 0` in DB)                   |
+| `/status`    | Report voter client liveness and current voting enabled state |
+| `/schedule`  | Open the inline-keyboard schedule editor (see below)          |
+
+Commands are **DM-only** and only work for users registered in the database. Unregistered Telegram accounts receive:
+`"You're not registered. Contact the administrator."`
+
+> **Note:** The old Saved-Messages `/ping → pong` liveness flow has been removed. Use `/status` instead.
+
+### Example `/status` response
+
+```
+Voter: up
+Voting: enabled
+```
+
+### Schedule Editor (`/schedule`)
+
+The `/schedule` command opens an inline keyboard that lets you view, add, and remove schedule entries without needing DB access.
+
+**Main screen** — lists all current entries and shows action buttons:
+
+```
+Your schedule:
+1. Game wed 20:30
+2. Training tue
+
+[➕ Add]  [❌ Remove]  [✖ Close]
+```
+
+- If the schedule is empty, only `[➕ Add]` and `[✖ Close]` are shown.
+- If the DB entry is malformed, an error message is shown with only `[✖ Close]`.
+
+**Add flow:**
+
+1. Tap `[➕ Add]` → choose event type: `[🏐 Game]` or `[🏃 Training]`
+2. Choose a weekday (Mon–Sun)
+3. Entry is appended (no start time — time-less entry matches any poll at that day)
+4. Main screen is redrawn with the new entry
+
+**Remove flow:**
+
+1. Tap `[❌ Remove]` → each existing entry appears as a button with its details
+2. Tap any entry to delete it immediately (no confirmation prompt)
+3. The remove list stays open after deletion to support bulk cleanup; tap `[⬅ Back]` to return to the main screen
+
+**Live propagation:** changes take effect on the next poll without a bot restart — the voter re-parses the schedule from the database on every incoming forum message.
+
+> **Note:** If the bot restarts while you have a `/schedule` keyboard open, the inline buttons become stale. Simply re-send `/schedule` to get a fresh keyboard.
 
 ## Usage
 
@@ -154,14 +223,17 @@ docker run -d \
 ## How It Works
 
 1. At startup, pending DB migrations are applied and all enabled users are loaded
-2. One Pyrogram client is started per user; all run concurrently via `pyrogram.compose`
-3. When a poll is posted in a monitored forum topic, each bot independently:
+2. One Pyrogram voter client is started per user
+3. Each voter calls `get_me()` to discover its Telegram user ID, which is stored in the DB (`telegram_user_id`)
+4. The manager bot client starts after all voters are registered
+5. When a poll is posted in a monitored forum topic, each voter independently:
+   - Checks if autovoting is enabled (can be toggled via `/enable`/`/disable`)
    - Parses the topic name to extract event information (type, date, time)
    - Checks if the event date is in the future
    - Verifies if the event matches the user's configured schedule
    - Automatically votes for the configured option (e.g., "Go!")
    - Skips voting if already voted
-   - Sends a notification message (if `BOT_TOKEN` is configured) with event details
+   - Sends a notification message via the manager bot with event details
 
-4. Health check endpoint is available at `http://localhost:8080/health` and reports the connection state of all
-   registered clients
+6. Health check endpoint is available at `http://localhost:8080/health` and reports the connection state of all
+   registered clients (voters + manager bot)
