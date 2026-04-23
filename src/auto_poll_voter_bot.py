@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from pyrogram.types import ForumTopic
 
     from src.auto_poll_manager_bot import AutoPollManagerBot
+    from src.reminder_discovery import ReminderDiscovery
 
 from src.config import CommonConfig, ScheduledEvent
 from src.schedule_dsl import parse_schedule_dsl
@@ -25,6 +26,7 @@ class AutoPollVoterBot:
             user: UserRecord,
             event_info_parser,
             manager: "AutoPollManagerBot",
+            reminder_discovery: Optional["ReminderDiscovery"] = None,
     ):
         self.common = common
         self.user = user
@@ -37,6 +39,7 @@ class AutoPollVoterBot:
         )
         self.event_info_parser = event_info_parser
         self.manager = manager
+        self.reminder_discovery = reminder_discovery
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -156,11 +159,25 @@ class AutoPollVoterBot:
                 choice_index,
                 topic_name,
             )
-
-            # Send notification after successful vote
-            await self.send_vote_notification(topic_name)
         except Exception as e:
             self.log.error("Voting failed on poll %s: %s", message.id, e)
+            return
+
+        # Record reminder for successful vote (isolated so a DB error does not
+        # suppress the vote notification that follows)
+        if self.reminder_discovery is not None:
+            try:
+                await self.reminder_discovery.record_from_vote(
+                    topic_name,
+                    message.chat.id,
+                    message.message_thread_id,
+                    message.id,
+                )
+            except Exception as e:
+                self.log.error("Failed to record reminder after vote on poll %s: %s", message.id, e)
+
+        # Send notification after successful vote
+        await self.send_vote_notification(topic_name)
 
     async def on_forum_message(self, client, message: Message):
         """

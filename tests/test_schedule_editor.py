@@ -29,6 +29,8 @@ def _make_user_record(
         vote_delay_seconds=5,
         telegram_user_id=tg_id,
         enabled=enabled,
+        reminders_enabled=True,
+        reminder_lead_hours=27,
     )
 
 

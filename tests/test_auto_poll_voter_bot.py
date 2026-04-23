@@ -1,4 +1,4 @@
-"""Tests for AutoPollVoterBot (Task 6 and Task 3).
+"""Tests for AutoPollVoterBot (Task 6, Task 3, and Task 4).
 
 Covers:
   - enabled guard: on_forum_message returns early when user.enabled is False
@@ -10,6 +10,9 @@ Covers:
   - topic_name_matches: stateless re-parse of event_schedule on every call (Task 3)
   - topic_name_matches: empty schedule returns False (Task 3)
   - topic_name_matches: unparseable DSL logs and returns False (Task 3)
+  - reminder_discovery: record_from_vote called on successful vote (Task 4)
+  - reminder_discovery: None is backward-compatible (Task 4)
+  - reminder_discovery: NOT called when vote_poll raises (Task 4)
 """
 import asyncio
 import logging
@@ -52,6 +55,8 @@ def _make_user(
         vote_delay_seconds=0,
         telegram_user_id=telegram_user_id,
         enabled=enabled,
+        reminders_enabled=True,
+        reminder_lead_hours=27,
     )
 
 
@@ -63,7 +68,7 @@ def _make_manager() -> MagicMock:
     return manager
 
 
-def _make_voter(user: Optional[UserRecord] = None, manager=None) -> AutoPollVoterBot:
+def _make_voter(user: Optional[UserRecord] = None, manager=None, reminder_discovery=None) -> AutoPollVoterBot:
     """Create an AutoPollVoterBot with a patched Pyrogram Client."""
     if user is None:
         user = _make_user()
@@ -79,6 +84,7 @@ def _make_voter(user: Optional[UserRecord] = None, manager=None) -> AutoPollVote
             user=user,
             event_info_parser=event_info_parser,
             manager=manager,
+            reminder_discovery=reminder_discovery,
         )
     return voter
 
@@ -294,6 +300,8 @@ class TestTopicNameMatchesStatelessReParse:
             vote_delay_seconds=0,
             telegram_user_id=111,
             enabled=True,
+            reminders_enabled=True,
+            reminder_lead_hours=27,
         )
         return _make_voter(user=user)
 
@@ -338,3 +346,123 @@ class TestTopicNameMatchesStatelessReParse:
         assert result is False
         # log.exception records at ERROR level
         assert any("Could not parse event_schedule" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for vote_in_thread_poll integration tests
+# ---------------------------------------------------------------------------
+
+def _make_voter_with_real_internals(
+    user: Optional[UserRecord] = None,
+    reminder_discovery=None,
+) -> AutoPollVoterBot:
+    """Make a voter where app.vote_poll and app.get_forum_topic are async mocks."""
+    if user is None:
+        user = _make_user()
+    manager = _make_manager()
+    common = _make_common()
+    event_info_parser = MagicMock()
+
+    with patch("src.auto_poll_voter_bot.Client") as mock_client_cls:
+        mock_app = MagicMock()
+        mock_app.vote_poll = AsyncMock()
+        mock_app.get_forum_topic = AsyncMock()
+        mock_client_cls.return_value = mock_app
+        voter = AutoPollVoterBot(
+            common=common,
+            user=user,
+            event_info_parser=event_info_parser,
+            manager=manager,
+            reminder_discovery=reminder_discovery,
+        )
+    return voter
+
+
+def _make_full_poll_message(chat_id: int = -100, thread_id: int = 42, msg_id: int = 7) -> MagicMock:
+    """Build a minimal poll message with chat, thread, and poll option."""
+    msg = MagicMock()
+    msg.chat = MagicMock()
+    msg.chat.id = chat_id
+    msg.message_thread_id = thread_id
+    msg.id = msg_id
+    msg.poll = MagicMock()
+    msg.poll.chosen_option_id = None
+    option = MagicMock()
+    option.text = "Go!"
+    msg.poll.options = [option]
+    return msg
+
+
+# ---------------------------------------------------------------------------
+# Tests: reminder_discovery integration in vote_in_thread_poll (Task 4)
+# ---------------------------------------------------------------------------
+
+class TestVoteInThreadPollReminderDiscovery:
+    """Tests that vote_in_thread_poll wires in reminder_discovery correctly."""
+
+    def _setup_voter_with_matching_topic(self, reminder_discovery=None):
+        """Set up a voter that will match a topic and proceed to vote."""
+        from datetime import date, time
+        from src.event_info_parser import EventInfo
+
+        user = _make_user()
+        voter = _make_voter_with_real_internals(user=user, reminder_discovery=reminder_discovery)
+
+        # topic name returns matching event
+        topic = MagicMock()
+        topic.name = "Game 2099-01-05, Wed, 20:00-22:00"
+        voter.app.get_forum_topic = AsyncMock(return_value=topic)
+
+        future_wed = date(2099, 1, 5)
+        voter.event_info_parser.parse_line.return_value = EventInfo(
+            event_type="Game",
+            event_date=future_wed,
+            weekday="Wed",
+            start_time=time(20, 0),
+            end_time=time(22, 0),
+        )
+        # Patch vote_poll to succeed silently
+        voter.app.vote_poll = AsyncMock()
+        # Patch send_vote_notification to avoid manager call
+        voter.send_vote_notification = AsyncMock()
+        return voter
+
+    def test_record_from_vote_called_on_successful_vote(self):
+        """After a successful vote_poll, record_from_vote is awaited with correct args."""
+        discovery = MagicMock()
+        discovery.record_from_vote = AsyncMock()
+
+        voter = self._setup_voter_with_matching_topic(reminder_discovery=discovery)
+        msg = _make_full_poll_message(chat_id=-100, thread_id=42, msg_id=7)
+
+        asyncio.run(voter.vote_in_thread_poll(msg))
+
+        discovery.record_from_vote.assert_awaited_once_with(
+            "Game 2099-01-05, Wed, 20:00-22:00",
+            -100,
+            42,
+            7,
+        )
+
+    def test_reminder_discovery_none_vote_succeeds(self):
+        """When reminder_discovery=None, voting still completes without error (backward-compat)."""
+        voter = self._setup_voter_with_matching_topic(reminder_discovery=None)
+        msg = _make_full_poll_message()
+
+        # Should not raise
+        asyncio.run(voter.vote_in_thread_poll(msg))
+        voter.app.vote_poll.assert_awaited_once()
+
+    def test_record_from_vote_not_called_when_vote_poll_raises(self):
+        """When vote_poll raises an exception, record_from_vote must NOT be called."""
+        discovery = MagicMock()
+        discovery.record_from_vote = AsyncMock()
+
+        voter = self._setup_voter_with_matching_topic(reminder_discovery=discovery)
+        voter.app.vote_poll = AsyncMock(side_effect=RuntimeError("Telegram error"))
+        msg = _make_full_poll_message()
+
+        # Should not raise — exception is caught inside vote_in_thread_poll
+        asyncio.run(voter.vote_in_thread_poll(msg))
+
+        discovery.record_from_vote.assert_not_awaited()

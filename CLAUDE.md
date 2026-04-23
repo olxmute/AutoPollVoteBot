@@ -44,6 +44,8 @@ The bot uses a Jinja2-based configuration system for shared config, plus a SQLit
 - `vote_delay_seconds`: Delay before voting (default: 5)
 - `enabled`: Whether autovoting is active for this user (0/1); mutable at runtime via `/enable`/`/disable`
 - `telegram_user_id`: Telegram user ID, populated automatically on first startup via `get_me()` backfill
+- `reminders_enabled`: Whether reminder DMs are active for this user (1/0, default 1); mutable via `/reminders`
+- `reminder_lead_hours`: How many hours before the event to fire the reminder (default 27); mutable via `/reminders`
 
 ## Architecture
 
@@ -51,11 +53,12 @@ The bot uses a Jinja2-based configuration system for shared config, plus a SQLit
 
 1. **AutoPollVoterBot** (`src/auto_poll_voter_bot.py`):
    - One instance per user; wraps a `pyrogram.Client`
-   - Constructor: `(common: CommonConfig, user: UserRecord, event_info_parser, manager: AutoPollManagerBot)`
+   - Constructor: `(common: CommonConfig, user: UserRecord, event_info_parser, manager: AutoPollManagerBot, reminder_discovery: Optional[ReminderDiscovery] = None)`
    - Does **not** cache parsed schedule — re-parses `self.user.event_schedule` on every call to `topic_name_matches()`; schedule edits via ScheduleEditor propagate automatically through the shared `UserRecord` without a restart
    - Core logic: `on_forum_message()` -> `vote_in_thread_poll()`
    - Validates events via `topic_name_matches()` before voting
    - Reads `self.user.enabled` at the top of `on_forum_message`; returns early if False
+   - After a successful `vote_poll(...)`, calls `await self.reminder_discovery.record_from_vote(...)` if `reminder_discovery` is not None
 
 2. **EventInfoParser** (`src/event_info_parser.py`):
    - Parses forum topic names to extract event metadata
@@ -77,10 +80,12 @@ The bot uses a Jinja2-based configuration system for shared config, plus a SQLit
 
 5. **AutoPollManagerBot** (`src/auto_poll_manager_bot.py`):
    - Telegram bot that lets registered users manage their autovoting config via DM commands
-   - Commands: `/enable`, `/disable`, `/status`, `/schedule` (DM-only, registered users only)
+   - Commands: `/enable`, `/disable`, `/status`, `/schedule`, `/reminders` (DM-only, registered users only)
    - Maintains a registry of `VoterHandle` objects keyed by Telegram user ID
    - Voter bots use `manager.app.send_message(...)` directly for vote notifications
    - Wires in `ScheduleEditor` on construction: `self._schedule_editor = ScheduleEditor(repo, self._handles)`
+   - Wires in `RemindersEditor` and `ReminderScheduler` on construction
+   - `start_scheduler()` / `stop_scheduler()` — thin wrappers over `ReminderScheduler.start()` / `.stop()`
 
 6. **VoterHandle** (`src/voter_handle.py`):
    - Two-field dataclass: `user: UserRecord`, `client: pyrogram.Client`
@@ -100,15 +105,39 @@ The bot uses a Jinja2-based configuration system for shared config, plus a SQLit
    - Persists via `repo.set_event_schedule(telegram_user_id, new_dsl)` and immediately mutates `handle.user.event_schedule`; mutation propagates to voter via the shared `UserRecord` reference
    - Callback data scheme (stateless, ≤64 bytes): `sch:main`, `sch:close`, `sch:add`, `sch:add:t:<Type>`, `sch:add:d:<Type>:<day>`, `sch:rm`, `sch:rm:<index>`
 
-8. **Database** (`src/database.py`):
-   - `apply_migrations(db_path)`: applies pending yoyo migrations at startup
+8. **RemindersEditor** (`src/reminders_editor.py`):
+   - Owns the entire `/reminders` inline-keyboard UI: command handler + all `rem:*` callback routes + free-text lead-time reply handler
+   - Constructor: `(repo: UserRepository, handles: Dict[int, VoterHandle])`; same shape as `ScheduleEditor`
+   - `register_handlers(app)` registers one `MessageHandler` (for `/reminders`), one `CallbackQueryHandler` (for `^rem:` callbacks), and one `MessageHandler` for the free-text lead-time reply (`filters.private & filters.reply & filters.text`)
+   - Main screen: text `Reminders: ON|OFF\nLead time: {hours} hours`; buttons `[Disable]/[Enable]` + `[Lead time]` + `[Close]`
+   - `rem:toggle` — flips `reminders_enabled`, persists via `repo.set_reminders_enabled`, mutates `handle.user.reminders_enabled`, re-renders
+   - `rem:lead` — sends a ForceReply prompt, stashes `self._pending_lead_input[from_user.id] = prompt_message_id`; reply handler validates positive integer, calls `repo.set_reminder_lead_hours`, mutates `handle.user.reminder_lead_hours`, clears pending, re-renders main screen
+   - DM-only + registered-user gating identical to `ScheduleEditor`
+   - Callback data scheme (stateless, ≤64 bytes): `rem:main`, `rem:close`, `rem:toggle`, `rem:lead`
 
-9. **User Repository** (`src/user_repository.py`):
-   - `UserRecord` holds **mutable runtime state**: `enabled` and `event_schedule` are mutated in-place by manager
-     commands and `ScheduleEditor` — no locks needed (single event loop), and the voter picks up changes on the next
-     poll
-   - `UserRepository(db_path)`: `get_enabled_users()`, `set_telegram_user_id(user_id, telegram_user_id)`,
-     `set_enabled(telegram_user_id, enabled) -> int`, `set_event_schedule(telegram_user_id, dsl) -> int`
+9. **ReminderDiscovery** (`src/reminder_discovery.py`):
+   - Module-level helpers: `prague_datetime_to_utc(event_date, event_time) -> datetime` (Prague/CET/CEST → UTC, DST-aware via `zoneinfo`); `chosen_option_is_go(poll, vote_option_text) -> bool` (pure substring match, NO fallback to index 0 — distinct from `AutoPollVoterBot.choose_option`)
+   - Class `ReminderDiscovery(user: UserRecord, event_info_parser: EventInfoParser, reminders: ReminderRepository)` — one instance per voter, constructed in `app.py`
+   - `async record_from_vote(topic_name, chat_id, topic_id, poll_message_id)` — called by the voter after a successful vote; skips silently (with warning log) if `telegram_user_id is None` or topic_name is unparseable; no `reminders_enabled` or lead-time check at insert (both handled by the poller)
+
+10. **ReminderRepository** (`src/reminder_repository.py`):
+    - `DueReminder` dataclass: `id, telegram_user_id, chat_id, topic_id, poll_message_id, topic_name, event_datetime, reminder_lead_hours`
+    - `ReminderRepository(db_path: str)`: `upsert(...)` (INSERT … ON CONFLICT DO UPDATE WHERE reminded_at IS NULL — frozen already-sent rows), `fetch_due() -> list[DueReminder]` (SQL gates on `reminded_at IS NULL`, `reminders_enabled = 1`, `event_datetime > now`; lead-hours returned for Python-side filter), `mark_reminded(id) -> int`, `delete_old(retention_days=7) -> int`
+
+11. **ReminderScheduler** (`src/reminder_scheduler.py`):
+    - Class `ReminderScheduler(common: CommonConfig, repo: ReminderRepository, handles: Dict[int, VoterHandle], manager_app: pyrogram.Client)`
+    - Constants: `POLL_INTERVAL_SECONDS = 300`, `RETENTION_DAYS = 7`
+    - `start()` — spawns a single `asyncio.Task` for the poller loop
+    - `stop()` — sets `_stopping`, cancels and awaits the task; second call is a no-op
+    - `_tick()`: outer `try/finally` ensures `repo.delete_old(RETENTION_DAYS)` runs even if the row loop raises; for each due row (after Python-side lead-time filter): look up `VoterHandle` (skip if missing), revocation check via `handle.client.get_messages` + `chosen_option_is_go`, send via `manager_app.send_message` + mark reminded; send failures leave `reminded_at` NULL for natural retry
+
+12. **Database** (`src/database.py`):
+    - `apply_migrations(db_path)`: applies pending yoyo migrations at startup
+    - Migration `0003_add_reminders`: adds `reminders_enabled` and `reminder_lead_hours` to `users`, creates `reminders` table with UNIQUE `(telegram_user_id, chat_id, topic_id)` and index on `(reminded_at, event_datetime)`
+
+13. **User Repository** (`src/user_repository.py`):
+    - `UserRecord` holds **mutable runtime state**: `enabled`, `event_schedule`, `reminders_enabled`, and `reminder_lead_hours` are mutated in-place by manager commands — no locks needed (single event loop), and the voter/poller pick up changes on the next poll
+    - `UserRepository(db_path)`: `get_enabled_users()`, `set_telegram_user_id(user_id, telegram_user_id)`, `set_enabled(telegram_user_id, enabled) -> int`, `set_event_schedule(telegram_user_id, dsl) -> int`, `set_reminders_enabled(telegram_user_id, enabled) -> int`, `set_reminder_lead_hours(telegram_user_id, hours) -> int`
 
 ### Startup Sequence (`app.py`)
 
@@ -122,18 +151,20 @@ Module scope (synchronous, pre-loop — only non-async setup):
 Inside `main()` (all Pyrogram construction and async work happens here, so asyncio objects bind to the running loop —
 see note below):
 
-1. Construct `AutoPollManagerBot` (requires `BOT_TOKEN`)
-2. Load enabled users via `repo.get_enabled_users()`; raise `RuntimeError` if none (propagates to the module-scope
+1. Construct `ReminderRepository(common.database.path)`
+2. Construct `AutoPollManagerBot(common, repo, reminder_repo)` (requires `BOT_TOKEN`; wires `RemindersEditor` + `ReminderScheduler` internally)
+3. Load enabled users via `repo.get_enabled_users()`; raise `RuntimeError` if none (propagates to the module-scope
    `except Exception`, which flips health to unhealthy)
-3. Build one `AutoPollVoterBot` per user, passing `manager=manager_bot`
-4. Register all voter clients and the manager client with `health_server`
-5. Start each voter client (`await bot.app.start()`); track started voters for safe cleanup
-6. For each voter: `get_me()`, upsert `telegram_user_id` in DB, mutate `bot.user.telegram_user_id`, register
+4. For each user: construct `ReminderDiscovery(user, event_info_parser, reminder_repo)`, then `AutoPollVoterBot(..., reminder_discovery=...)`
+5. Register all voter clients and the manager client with `health_server`
+6. Start each voter client (`await bot.app.start()`); track started voters for safe cleanup
+7. For each voter: `get_me()`, upsert `telegram_user_id` in DB, mutate `bot.user.telegram_user_id`, register
    `VoterHandle` in manager
-7. Start manager client (`await manager_bot.app.start()`)
-8. Set health server to healthy
-9. Block on `await asyncio.Event().wait()` until cancelled (SIGINT/KeyboardInterrupt)
-10. `finally`: stop manager first, then each started voter in reverse order
+8. Start manager client (`await manager_bot.app.start()`)
+9. `await manager_bot.start_scheduler()` — starts the 5-minute reminder poller task
+10. Set health server to healthy
+11. Block on `await asyncio.Event().wait()` until cancelled (SIGINT/KeyboardInterrupt)
+12. `finally`: `await manager_bot.stop_scheduler()` first, then stop manager client, then each started voter in reverse order
 
 **Why Pyrogram clients must be constructed inside `main()`**: `pyrogram.Client.__init__` binds internal asyncio
 primitives to whatever loop `asyncio.get_event_loop()` resolves at construction time. Constructing clients at module
@@ -147,8 +178,7 @@ construction back above `asyncio.run()`.
 2. Pyrogram filters (chat + forum topic + poll) → fetch topic name → parse into `EventInfo`
 3. Validate: event date strictly in the future AND matches schedule (type, day)
 4. Skip if poll already has `chosen_option_id`; otherwise pick option matching `vote_option`
-5. `await asyncio.sleep(vote_delay_seconds)` → `vote_poll(...)` → notify user via `self.manager.app.send_message(...)`
-   with `ParseMode.HTML`
+5. `await asyncio.sleep(vote_delay_seconds)` → `vote_poll(...)` → `await self.reminder_discovery.record_from_vote(...)` inserts/upserts a row in the `reminders` table → notify user via `self.manager.app.send_message(...)` with `ParseMode.HTML`
 
 ### Configuration Rendering
 

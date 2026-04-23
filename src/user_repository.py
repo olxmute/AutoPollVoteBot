@@ -12,6 +12,8 @@ class UserRecord:
     vote_delay_seconds: int
     telegram_user_id: Optional[int]
     enabled: bool
+    reminders_enabled: bool
+    reminder_lead_hours: int
 
 
 class UserRepository:
@@ -23,7 +25,8 @@ class UserRepository:
         try:
             cursor = conn.execute(
                 "SELECT id, session_name, session_string, event_schedule, vote_delay_seconds, "
-                "telegram_user_id FROM users WHERE enabled = 1"
+                "telegram_user_id, reminders_enabled, reminder_lead_hours "
+                "FROM users WHERE enabled = 1"
             )
             return [
                 UserRecord(
@@ -34,6 +37,8 @@ class UserRepository:
                     vote_delay_seconds=row[4],
                     telegram_user_id=row[5],
                     enabled=True,
+                    reminders_enabled=bool(row[6]),
+                    reminder_lead_hours=row[7],
                 )
                 for row in cursor.fetchall()
             ]
@@ -71,6 +76,51 @@ class UserRepository:
             cursor = conn.execute(
                 "UPDATE users SET event_schedule = ? WHERE telegram_user_id = ?",
                 (dsl, telegram_user_id),
+            )
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            conn.close()
+
+    def set_reminders_enabled(self, telegram_user_id: int, enabled: bool) -> int:
+        """Enable or disable reminders for the user identified by telegram_user_id.
+
+        Returns the number of rows affected (0 if no matching row, 1 on success).
+
+        Raises ValueError if telegram_user_id is None, since NULL equality in SQL
+        silently matches 0 rows.
+        """
+        if telegram_user_id is None:
+            raise ValueError("telegram_user_id must not be None")
+        conn = sqlite3.connect(self._db_path)
+        try:
+            cursor = conn.execute(
+                "UPDATE users SET reminders_enabled = ? WHERE telegram_user_id = ?",
+                (1 if enabled else 0, telegram_user_id),
+            )
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            conn.close()
+
+    def set_reminder_lead_hours(self, telegram_user_id: int, hours: int) -> int:
+        """Set the reminder lead time in hours for the user identified by telegram_user_id.
+
+        Returns the number of rows affected (0 if no matching row, 1 on success).
+
+        Raises ValueError if telegram_user_id is None, since NULL equality in SQL
+        silently matches 0 rows.
+        Raises ValueError if hours < 1.
+        """
+        if telegram_user_id is None:
+            raise ValueError("telegram_user_id must not be None")
+        if hours < 1:
+            raise ValueError("hours must be >= 1")
+        conn = sqlite3.connect(self._db_path)
+        try:
+            cursor = conn.execute(
+                "UPDATE users SET reminder_lead_hours = ? WHERE telegram_user_id = ?",
+                (hours, telegram_user_id),
             )
             conn.commit()
             return cursor.rowcount

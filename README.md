@@ -11,6 +11,7 @@ multiple users concurrently via a SQLite-backed user database.
 - Only votes on future events that match configured schedules
 - Multi-user support: run N Pyrogram clients concurrently
 - Manager bot for per-user configuration via Telegram DM commands
+- Per-event reminders: DMs each user before events they auto-voted for
 - Health check endpoint reporting all client connection states
 - Docker support
 
@@ -106,6 +107,29 @@ CREATE UNIQUE INDEX idx_users_telegram_user_id
 The `telegram_user_id` column is populated automatically on first startup: each enabled voter calls `get_me()` to
 discover its Telegram account and upserts the value. No manual data entry is needed.
 
+Migration `0003_add_reminders` adds two columns to `users` and creates the `reminders` table:
+
+```sql
+ALTER TABLE users ADD COLUMN reminders_enabled INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE users ADD COLUMN reminder_lead_hours INTEGER NOT NULL DEFAULT 27;
+
+CREATE TABLE reminders (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_user_id INTEGER NOT NULL,
+    chat_id          INTEGER NOT NULL,
+    topic_id         INTEGER NOT NULL,
+    poll_message_id  INTEGER NOT NULL,
+    topic_name       TEXT    NOT NULL,
+    event_datetime   TEXT    NOT NULL, -- ISO-8601 UTC
+    reminded_at      TEXT,             -- NULL = not yet sent
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (telegram_user_id, chat_id, topic_id)
+);
+```
+
+Existing users are opted in (`reminders_enabled = 1`) and given a 27-hour default lead time automatically when the
+migration runs.
+
 ### Adding users manually
 
 ```bash
@@ -136,12 +160,13 @@ This configures the bot to vote on:
 
 Each registered user can DM the bot to manage their autovoting configuration:
 
-| Command      | Description                                                   |
-|--------------|---------------------------------------------------------------|
-| `/enable`    | Resume autovoting (sets `enabled = 1` in DB)                  |
-| `/disable`   | Pause autovoting (sets `enabled = 0` in DB)                   |
-| `/status`    | Report voter client liveness and current voting enabled state |
-| `/schedule`  | Open the inline-keyboard schedule editor (see below)          |
+| Command       | Description                                                   |
+|---------------|---------------------------------------------------------------|
+| `/enable`     | Resume autovoting (sets `enabled = 1` in DB)                  |
+| `/disable`    | Pause autovoting (sets `enabled = 0` in DB)                   |
+| `/status`     | Report voter client liveness and current voting enabled state |
+| `/schedule`   | Open the inline-keyboard schedule editor (see below)          |
+| `/reminders`  | Open the inline-keyboard reminders editor (see below)         |
 
 Commands are **DM-only** and only work for users registered in the database. Unregistered Telegram accounts receive:
 `"You're not registered. Contact the administrator."`
@@ -190,6 +215,37 @@ Your schedule:
 
 > **Note:** If the bot restarts while you have a `/schedule` keyboard open, the inline buttons become stale. Simply re-send `/schedule` to get a fresh keyboard.
 
+### Reminders (`/reminders`)
+
+The `/reminders` command opens an inline keyboard for managing per-event reminder settings.
+
+**Main screen:**
+
+```
+Reminders: ON
+Lead time: 27 hours
+
+[Disable]  [Lead time]
+[✖ Close]
+```
+
+- **Reminders ON/OFF** — tap `[Disable]` or `[Enable]` to toggle. When OFF, no reminders are sent for pending events,
+  but rows are retained. Toggling back to ON before the event fires will send the reminder at the next poller tick.
+- **Lead time** — how many hours before an event to send the reminder. Default: **27 hours**. Tap `[Lead time]`, then
+  reply to the bot's prompt with a positive whole number (e.g. `36`).
+
+**Key facts:**
+
+- Reminders are only sent for events the autovoter voted on. Votes cast manually from another Telegram client are
+  **not** covered.
+- The poller runs every **5 minutes**. Reminders may fire up to 5 minutes late.
+- Rows for events that have passed more than **7 days** ago are pruned automatically on each poller tick.
+- The revocation check is performed immediately before sending: if your vote was retracted, the reminder is silently
+  skipped (but the row is marked as processed so it won't retry).
+
+> **Note:** If the bot restarts while you have a `/reminders` keyboard open, the inline buttons become stale. Simply
+> re-send `/reminders` to get a fresh keyboard.
+
 ## Usage
 
 ### Running Locally
@@ -231,6 +287,15 @@ docker run -d \
    - Automatically votes for the configured option (e.g., "Go!")
    - Skips voting if already voted
    - Sends a notification message via the manager bot with event details
+   - On a successful vote, records a row in the `reminders` table for later delivery
 
-6. Health check endpoint is available at `http://localhost:8080/health` and reports the connection state of all
+6. A background poller runs every **5 minutes** inside the manager bot:
+   - Fetches all un-sent reminder rows whose event is still in the future and whose user has reminders enabled
+   - Applies the per-user lead-time filter in Python (event ≤ `reminder_lead_hours` hours away)
+   - Performs a revocation check (re-fetches the poll from Telegram); if the user's vote was retracted, marks the row
+     as processed without sending
+   - Sends the reminder DM via the manager bot; marks the row as sent on success
+   - Prunes rows for events that passed more than 7 days ago (runs in `finally`, so cleanup is never skipped)
+
+7. Health check endpoint is available at `http://localhost:8080/health` and reports the connection state of all
    registered clients (voters + manager bot)
