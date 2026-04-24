@@ -110,12 +110,9 @@ class UserRepository:
 
         Raises ValueError if telegram_user_id is None, since NULL equality in SQL
         silently matches 0 rows.
-        Raises ValueError if hours < 1.
         """
         if telegram_user_id is None:
             raise ValueError("telegram_user_id must not be None")
-        if hours < 1:
-            raise ValueError("hours must be >= 1")
         conn = sqlite3.connect(self._db_path)
         try:
             cursor = conn.execute(

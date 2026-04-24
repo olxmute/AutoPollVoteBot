@@ -127,8 +127,7 @@ CREATE TABLE reminders (
 );
 ```
 
-Existing users are opted in (`reminders_enabled = 1`) and given a 27-hour default lead time automatically when the
-migration runs.
+New users default to reminders on (`reminders_enabled = 1`); each user can opt out via `/reminders`.
 
 ### Adding users manually
 
@@ -222,17 +221,16 @@ The `/reminders` command opens an inline keyboard for managing per-event reminde
 **Main screen:**
 
 ```
-Reminders: ON
-Lead time: 27 hours
+Reminders: OFF
+27 hours before the event
 
-[Disable]  [Lead time]
+[Enable]  [Change timing]
 [✖ Close]
 ```
 
 - **Reminders ON/OFF** — tap `[Disable]` or `[Enable]` to toggle. When OFF, no reminders are sent for pending events,
   but rows are retained. Toggling back to ON before the event fires will send the reminder at the next poller tick.
-- **Lead time** — how many hours before an event to send the reminder. Default: **27 hours**. Tap `[Lead time]`, then
-  reply to the bot's prompt with a positive whole number (e.g. `36`).
+- **Reminder timing** — how many hours before an event to send the reminder. Default: **27 hours**, which is also the minimum the UI accepts (cancellation cutoff is 26h before the event, so the reminder must fire earlier); maximum is **720 hours** (30 days). Tap `[Change timing]`, then reply to the bot's prompt with a whole number between 27 and 720 (e.g. `36`).
 
 **Key facts:**
 

@@ -6,6 +6,8 @@ import asyncio
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from src.auto_poll_manager_bot import VoterHandle
 from src.reminders_editor import RemindersEditor
 from src.user_repository import UserRecord
@@ -100,14 +102,6 @@ def _collect_button_texts(markup) -> list:
     return texts
 
 
-def _collect_button_datas(markup) -> list:
-    datas = []
-    if markup and hasattr(markup, "inline_keyboard"):
-        for row in markup.inline_keyboard:
-            for btn in row:
-                datas.append(btn.callback_data)
-    return datas
-
 
 # ---------------------------------------------------------------------------
 # Tests: register_handlers
@@ -153,11 +147,14 @@ class TestMainScreen:
 
         button_texts = _collect_button_texts(markup)
         assert any("Disable" in t for t in button_texts), f"No Disable button: {button_texts}"
-        assert any("Lead time" in t for t in button_texts), f"No Lead time button: {button_texts}"
+        assert any("Change timing" in t for t in button_texts), f"No Change timing button: {button_texts}"
         assert any("Close" in t for t in button_texts), f"No Close button: {button_texts}"
 
     def test_main_screen_shows_off_status(self):
         """Main screen for disabled reminders shows 'OFF' and 'Enable' button."""
+        # reminder_lead_hours=10 is intentionally below the 27h UI minimum to verify the
+        # screen renders whatever value is stored in the DB (the UI minimum is enforced only
+        # on input, not on display).
         user = _make_user_record(tg_id=111, reminders_enabled=False, reminder_lead_hours=10)
         handle = _make_voter_handle(user)
         handles = {111: handle}
@@ -178,8 +175,8 @@ class TestMainScreen:
         assert any("Enable" in t for t in button_texts), f"No Enable button: {button_texts}"
         assert not any(t == "Disable" for t in button_texts), f"Unexpected Disable button: {button_texts}"
 
-    def test_main_screen_shows_lead_time(self):
-        """Main screen text shows the current lead time in hours."""
+    def test_main_screen_shows_reminder_timing(self):
+        """Main screen text shows the configured hours-before-event for the reminder."""
         user = _make_user_record(tg_id=111, reminders_enabled=True, reminder_lead_hours=36)
         handle = _make_voter_handle(user)
         handles = {111: handle}
@@ -191,7 +188,7 @@ class TestMainScreen:
         call_args = msg.reply_text.call_args
         text = call_args.args[0] if call_args.args else call_args.kwargs.get("text", "")
         assert "36" in text
-        assert "Lead time" in text
+        assert "hours before the event" in text
 
     def test_command_unregistered_rejected(self):
         """Unknown sender gets 'not registered' reply, no keyboard."""
@@ -416,6 +413,7 @@ class TestLeadCallback:
         text = call_args.args[0] if call_args.args else call_args.kwargs.get("text", "")
         assert "27" in text  # current hours shown
         assert "Reply with" in text or "reply" in text.lower()
+        assert "minimum" in text.lower()  # minimum lead hours shown
 
         markup = call_args.kwargs.get("reply_markup") or (
             call_args.args[1] if len(call_args.args) > 1 else None
@@ -468,13 +466,16 @@ class TestLeadTimeReply:
         editor._pending_lead_input[111] = 500
         return editor, handle, repo
 
-    def _make_reply_message(self, from_user_id=111, text="36", reply_to_id=500):
+    def _make_reply_message(self, from_user_id=111, text="36", reply_to_id=500, reprompt_id=700):
         msg = MagicMock()
         msg.from_user = MagicMock()
         msg.from_user.id = from_user_id
         msg.text = text
         msg.reply_to_message_id = reply_to_id
-        msg.reply_text = AsyncMock()
+        # reply_text returns a mock with .id so _reprompt_lead can rotate pending
+        reprompt_msg = MagicMock()
+        reprompt_msg.id = reprompt_id
+        msg.reply_text = AsyncMock(return_value=reprompt_msg)
         return msg
 
     def test_valid_reply_persists_and_mutates(self):
@@ -501,38 +502,96 @@ class TestLeadTimeReply:
         assert markup is not None
 
     def test_garbage_text_alerts_keeps_pending(self):
-        """Non-integer reply → error message, pending entry kept."""
+        """Non-integer reply → ForceReply re-prompt sent, pending id rotated to new prompt."""
+        from pyrogram.types import ForceReply
         editor, handle, _ = self._setup()
-        msg = self._make_reply_message(text="abc", reply_to_id=500)
+        msg = self._make_reply_message(text="abc", reply_to_id=500, reprompt_id=700)
 
         asyncio.run(editor._on_lead_time_reply(None, msg))
 
         msg.reply_text.assert_awaited_once()
-        text = msg.reply_text.call_args.args[0]
-        assert "positive whole number" in text.lower() or "whole number" in text.lower()
-        # Pending entry NOT cleared
-        assert editor._pending_lead_input.get(111) == 500
+        call_args = msg.reply_text.call_args
+        text = call_args.args[0] if call_args.args else call_args.kwargs.get("text", "")
+        assert "not a whole number" in text.lower() or "whole number" in text.lower()
+        # Must use ForceReply markup
+        markup = call_args.kwargs.get("reply_markup") or (
+            call_args.args[1] if len(call_args.args) > 1 else None
+        )
+        assert isinstance(markup, ForceReply), f"Expected ForceReply, got {type(markup)}"
+        # Pending id rotated to the new prompt's id (700), NOT the original 500
+        assert editor._pending_lead_input.get(111) == 700
 
-    def test_zero_hours_rejected_keeps_pending(self):
-        """0 hours is invalid — error message, pending entry kept."""
-        editor, handle, _ = self._setup()
-        msg = self._make_reply_message(text="0", reply_to_id=500)
-
-        asyncio.run(editor._on_lead_time_reply(None, msg))
-
-        msg.reply_text.assert_awaited_once()
-        text = msg.reply_text.call_args.args[0]
-        assert "positive" in text.lower() or "whole number" in text.lower()
-        assert editor._pending_lead_input.get(111) == 500
-
-    def test_negative_hours_rejected_keeps_pending(self):
-        """Negative integer is invalid — error, pending kept."""
-        editor, handle, _ = self._setup()
-        msg = self._make_reply_message(text="-5", reply_to_id=500)
+    def test_below_minimum_rejected_keeps_pending(self):
+        """26 hours (below 27h minimum) → ForceReply re-prompt sent, pending id rotated, DB not touched."""
+        from pyrogram.types import ForceReply
+        repo = _make_repo()
+        editor, handle, repo = self._setup(repo=repo)
+        msg = self._make_reply_message(text="26", reply_to_id=500, reprompt_id=700)
 
         asyncio.run(editor._on_lead_time_reply(None, msg))
 
         msg.reply_text.assert_awaited_once()
+        call_args = msg.reply_text.call_args
+        text = call_args.args[0] if call_args.args else call_args.kwargs.get("text", "")
+        assert "27" in text or "minimum" in text.lower() or "cancellation" in text.lower()
+        # Must use ForceReply markup
+        markup = call_args.kwargs.get("reply_markup") or (
+            call_args.args[1] if len(call_args.args) > 1 else None
+        )
+        assert isinstance(markup, ForceReply), f"Expected ForceReply, got {type(markup)}"
+        # Pending id rotated to new prompt (700), NOT the original 500
+        assert editor._pending_lead_input.get(111) == 700
+        # DB not touched
+        repo.set_reminder_lead_hours.assert_not_called()
+
+    def test_above_maximum_rejected_keeps_pending(self):
+        """721 hours (above 720h maximum) → ForceReply re-prompt sent, pending id rotated, DB not touched."""
+        from pyrogram.types import ForceReply
+        repo = _make_repo()
+        editor, handle, repo = self._setup(repo=repo)
+        msg = self._make_reply_message(text="721", reply_to_id=500, reprompt_id=700)
+
+        asyncio.run(editor._on_lead_time_reply(None, msg))
+
+        msg.reply_text.assert_awaited_once()
+        call_args = msg.reply_text.call_args
+        text = call_args.args[0] if call_args.args else call_args.kwargs.get("text", "")
+        assert "720" in text or "most" in text.lower() or "30 days" in text.lower()
+        # Must use ForceReply markup
+        markup = call_args.kwargs.get("reply_markup") or (
+            call_args.args[1] if len(call_args.args) > 1 else None
+        )
+        assert isinstance(markup, ForceReply), f"Expected ForceReply, got {type(markup)}"
+        # Pending id rotated to new prompt (700)
+        assert editor._pending_lead_input.get(111) == 700
+        # DB not touched
+        repo.set_reminder_lead_hours.assert_not_called()
+
+    def test_at_maximum_is_accepted(self):
+        """Exactly 720 hours (maximum) → persists, mutates handle, clears pending."""
+        editor, handle, repo = self._setup()
+        msg = self._make_reply_message(text="720", reply_to_id=500)
+
+        asyncio.run(editor._on_lead_time_reply(None, msg))
+
+        repo.set_reminder_lead_hours.assert_called_once_with(111, 720)
+        assert handle.user.reminder_lead_hours == 720
+        assert 111 not in editor._pending_lead_input
+
+    def test_reprompt_lead_failure_leaves_pending_at_original_id(self):
+        """If reply_text raises inside _reprompt_lead, pending keeps the original prompt id.
+
+        The user can still reply to the original ForceReply message and the gate accepts it.
+        """
+        editor, handle, _ = self._setup()
+        msg = self._make_reply_message(text="abc", reply_to_id=500, reprompt_id=700)
+        # Make reply_text raise so _reprompt_lead's assignment never executes
+        msg.reply_text = AsyncMock(side_effect=RuntimeError("Telegram send error"))
+
+        with pytest.raises(RuntimeError, match="Telegram send error"):
+            asyncio.run(editor._on_lead_time_reply(None, msg))
+
+        # Pending must still point at the original id (500), not rotated to 700
         assert editor._pending_lead_input.get(111) == 500
 
     def test_reply_not_to_our_prompt_is_ignored(self):
@@ -591,7 +650,7 @@ class TestLeadTimeReply:
         msg.reply_text.assert_not_called()
 
     def test_db_returns_zero_rows_alerts(self):
-        """If set_reminder_lead_hours returns 0 → error message, no mutation, pending kept."""
+        """If set_reminder_lead_hours returns 0 → error message, no mutation, pending cleared."""
         repo = _make_repo()
         repo.set_reminder_lead_hours.return_value = 0
         editor, handle, _ = self._setup(repo=repo)
@@ -604,8 +663,8 @@ class TestLeadTimeReply:
         msg.reply_text.assert_awaited_once()
         text = msg.reply_text.call_args.args[0]
         assert "save failed" in text.lower() or "try again" in text.lower()
-        # Pending kept
-        assert editor._pending_lead_input.get(111) == 500
+        # Pending cleared — mirrors the tg_id-is-None path so the user is not stuck
+        assert editor._pending_lead_input.get(111) is None
 
     def test_no_tg_id_alerts_on_valid_input(self):
         """Valid input but telegram_user_id=None → error, no repo call, pending cleared."""
@@ -625,6 +684,58 @@ class TestLeadTimeReply:
         assert "internal error" in text.lower()
         # Pending cleared so user is not stuck in an error loop
         assert 111 not in editor._pending_lead_input
+
+    def test_lead_time_at_minimum_is_accepted(self):
+        """Exactly 27 hours (minimum) → persists, mutates handle, clears pending, re-renders screen."""
+        from pyrogram.types import InlineKeyboardMarkup
+        editor, handle, repo = self._setup()
+        msg = self._make_reply_message(text="27", reply_to_id=500)
+
+        asyncio.run(editor._on_lead_time_reply(None, msg))
+
+        repo.set_reminder_lead_hours.assert_called_once_with(111, 27)
+        assert handle.user.reminder_lead_hours == 27
+        assert 111 not in editor._pending_lead_input
+        # Two reply_text calls: confirmation + main screen
+        assert msg.reply_text.call_count == 2
+        first_text = msg.reply_text.call_args_list[0].args[0]
+        assert "27" in first_text and "updated" in first_text.lower()
+        # Second call re-renders main screen with inline keyboard
+        second_call = msg.reply_text.call_args_list[1]
+        markup = second_call.kwargs.get("reply_markup") or (
+            second_call.args[1] if len(second_call.args) > 1 else None
+        )
+        assert isinstance(markup, InlineKeyboardMarkup), (
+            f"Expected InlineKeyboardMarkup on main screen re-render, got {type(markup)}"
+        )
+
+    def test_invalid_then_valid_reply_is_accepted(self):
+        """Regression: invalid reply rotates pending id; next reply to rotated id is accepted."""
+        from pyrogram.types import ForceReply
+        editor, handle, repo = self._setup()
+
+        # First reply: invalid (below minimum) → reprompt, pending rotates to 700
+        msg_invalid = self._make_reply_message(text="10", reply_to_id=500, reprompt_id=700)
+        asyncio.run(editor._on_lead_time_reply(None, msg_invalid))
+
+        # Pending should have rotated to the new prompt id
+        assert editor._pending_lead_input.get(111) == 700
+        # A ForceReply message was sent
+        msg_invalid.reply_text.assert_awaited_once()
+        reprompt_markup = msg_invalid.reply_text.call_args.kwargs.get("reply_markup") or (
+            msg_invalid.reply_text.call_args.args[1] if len(msg_invalid.reply_text.call_args.args) > 1 else None
+        )
+        assert isinstance(reprompt_markup, ForceReply)
+
+        # Second reply: valid (30h), reply_to_message_id matches the rotated id (700)
+        msg_valid = self._make_reply_message(text="30", reply_to_id=700)
+        asyncio.run(editor._on_lead_time_reply(None, msg_valid))
+
+        repo.set_reminder_lead_hours.assert_called_once_with(111, 30)
+        assert handle.user.reminder_lead_hours == 30
+        assert 111 not in editor._pending_lead_input
+        # Two reply_text calls on msg_valid: confirmation + main screen
+        assert msg_valid.reply_text.call_count == 2
 
 
 # ---------------------------------------------------------------------------

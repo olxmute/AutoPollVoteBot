@@ -93,6 +93,7 @@ class ReminderScheduler:
         """One tick: process due rows, then prune old rows (always)."""
         try:
             rows = self._repo.fetch_due()
+            self.log.debug("Fetched %d due reminder(s).", len(rows))
             for row in rows:
                 await self._process_row(row)
         finally:

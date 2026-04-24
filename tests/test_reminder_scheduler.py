@@ -601,11 +601,14 @@ class TestSchedulerLoopResilience:
 
         Strategy: make _tick raise on the first call, succeed on the second,
         then set _stopping = True so the loop exits.
+        Also asserts that asyncio.sleep is called after the failed tick so a
+        regression removing the inter-tick sleep would be caught.
         """
         tick_call_count = 0
+        sleep_call_count = 0
 
         async def _run():
-            nonlocal tick_call_count
+            nonlocal tick_call_count, sleep_call_count
             scheduler = _make_scheduler()
 
             async def controlled_tick():
@@ -618,10 +621,19 @@ class TestSchedulerLoopResilience:
 
             scheduler._tick = controlled_tick
 
+            async def counting_sleep(_seconds):
+                nonlocal sleep_call_count
+                sleep_call_count += 1
+
             # Run the loop directly (not via start/stop, to keep the test synchronous)
-            with patch("src.reminder_scheduler.asyncio.sleep", return_value=None) as mock_sleep:
+            with patch("src.reminder_scheduler.asyncio.sleep", side_effect=counting_sleep) as mock_sleep:
                 # Use a short timeout to avoid infinite loop in case of test bugs
                 await asyncio.wait_for(scheduler._run(), timeout=5)
+                # sleep must be called at least once (after the failed tick)
+                assert mock_sleep.call_count >= 1, (
+                    f"asyncio.sleep not called after tick exception; call_count={mock_sleep.call_count}"
+                )
 
         asyncio.run(_run())
         assert tick_call_count == 2, f"Expected 2 tick calls, got {tick_call_count}"
+        assert sleep_call_count >= 1, f"Expected sleep after exception tick, got {sleep_call_count}"

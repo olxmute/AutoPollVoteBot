@@ -21,6 +21,19 @@ docker build -t autopollvotebot .
 docker run -d --name autopollvotebot -p 8080:8080 --env-file .env autopollvotebot
 ```
 
+## Testing
+
+```bash
+# Full suite (from project root, .venv activated)
+pytest
+
+# Single file
+pytest tests/test_reminder_scheduler.py
+```
+
+- Tests use the `tmp_db` fixture in `tests/conftest.py`, which creates a temp SQLite DB with all yoyo migrations applied, one per test.
+- `tests/conftest.py` installs an explicit asyncio event loop before any `pyrogram` import. Required for Python 3.14 (implicit "current loop" was removed). Don't delete it.
+
 ## Configuration System
 
 The bot uses a Jinja2-based configuration system for shared config, plus a SQLite database for per-user config.
@@ -44,100 +57,43 @@ The bot uses a Jinja2-based configuration system for shared config, plus a SQLit
 - `vote_delay_seconds`: Delay before voting (default: 5)
 - `enabled`: Whether autovoting is active for this user (0/1); mutable at runtime via `/enable`/`/disable`
 - `telegram_user_id`: Telegram user ID, populated automatically on first startup via `get_me()` backfill
-- `reminders_enabled`: Whether reminder DMs are active for this user (1/0, default 1); mutable via `/reminders`
-- `reminder_lead_hours`: How many hours before the event to fire the reminder (default 27); mutable via `/reminders`
+- `reminders_enabled`: Whether reminder DMs are active for this user (0/1, default 1); mutable via `/reminders` — new users are opted in and can disable via `/reminders`
+- `reminder_lead_hours`: How many hours before the event to fire the reminder (default 27); mutable via `/reminders`; the UI enforces a minimum of 27 (cancellation cutoff is 26h before the event, so the reminder must fire earlier) and a maximum of 720 (30 days)
 
 ## Architecture
 
 ### Core Components
 
-1. **AutoPollVoterBot** (`src/auto_poll_voter_bot.py`):
-   - One instance per user; wraps a `pyrogram.Client`
-   - Constructor: `(common: CommonConfig, user: UserRecord, event_info_parser, manager: AutoPollManagerBot, reminder_discovery: Optional[ReminderDiscovery] = None)`
-   - Does **not** cache parsed schedule — re-parses `self.user.event_schedule` on every call to `topic_name_matches()`; schedule edits via ScheduleEditor propagate automatically through the shared `UserRecord` without a restart
-   - Core logic: `on_forum_message()` -> `vote_in_thread_poll()`
-   - Validates events via `topic_name_matches()` before voting
-   - Reads `self.user.enabled` at the top of `on_forum_message`; returns early if False
-   - After a successful `vote_poll(...)`, calls `await self.reminder_discovery.record_from_vote(...)` if `reminder_discovery` is not None
+One file per role in `src/`; read the file for API detail. Non-obvious invariants live in "Design Invariants" below.
 
-2. **EventInfoParser** (`src/event_info_parser.py`):
-   - Parses forum topic names to extract event metadata
-   - Expected format: `Type YYYY-MM-DD, Day, HH:MM-HH:MM`
-   - Example: "Game 2025-09-30, Tue, 20:00-22:00"
-   - Handles flexible time formats (8, 08:30, 930, 20.30, etc.)
+| Module | Role |
+|---|---|
+| `auto_poll_voter_bot.py` | One client per enabled user; listens for forum polls, votes, records reminder. |
+| `auto_poll_manager_bot.py` | Manager bot: `/enable`, `/disable`, `/status`; hosts the editors and scheduler. Registry of `VoterHandle`. |
+| `voter_handle.py` | `{user: UserRecord, client: Client}` dataclass. Extracted to break the manager↔voter circular import. |
+| `schedule_editor.py` | Owns `/schedule` UI (inline keyboard, `sch:*` callbacks). |
+| `reminders_editor.py` | Owns `/reminders` UI (inline keyboard, `rem:*` callbacks, ForceReply for lead-time). |
+| `reminder_discovery.py` | Called by voter after a successful vote; inserts a reminder row. Helpers: `prague_datetime_to_utc`, `chosen_option_is_go`. |
+| `reminder_repository.py` | SQLite store for `reminders` rows. `upsert`, `fetch_due`, `mark_reminded`, `delete_old`. |
+| `reminder_scheduler.py` | Background poller (5-min tick) that sends due reminders and prunes old rows. |
+| `user_repository.py` | SQLite store for `users`. `UserRecord` is shared live with the voter. |
+| `event_info_parser.py` | Parses topic names like `"Game 2025-09-30, Tue, 20:00-22:00"`. |
+| `schedule_dsl.py` | Parses/serializes `"Game wed; Training tue"`. Strict 2-token entries — 1- or 3-token lines raise `ValueError`. |
+| `config.py` / `yaml_renderer.py` | Loads `config.yaml.j2` → `CommonConfig`. |
+| `health_check.py` | Flask `/health` on its own thread; `register_client(client)` per bot. |
+| `database.py` | `apply_migrations(db_path)` — runs yoyo migrations in `migrations/`. |
 
-3. **Schedule DSL** (`src/schedule_dsl.py`):
-   - Parses schedule configuration strings
-   - Format: `Type day; Type day; ...`
-   - Example: `Game wed; Game sat; Training tue`
-   - Returns a list of dicts (converted to `ScheduledEvent` objects by `AutoPollVoterBot`)
-   - **Strict 2-token validation**: each entry must contain exactly two whitespace-separated tokens (`Type day`); entries with != 2 tokens (including 1-token or 3-token entries like `Game wed 20:30`) raise `ValueError`
+### Design Invariants (the stuff that will bite you)
 
-4. **Health Check Server** (`src/health_check.py`):
-   - Flask server running on separate thread
-   - Endpoint: `GET /health` (returns 200 OK or 503 unhealthy)
-   - Multi-client: use `register_client(client)` for each bot; reports all N clients
-
-5. **AutoPollManagerBot** (`src/auto_poll_manager_bot.py`):
-   - Telegram bot that lets registered users manage their autovoting config via DM commands
-   - Commands: `/enable`, `/disable`, `/status`, `/schedule`, `/reminders` (DM-only, registered users only)
-   - Maintains a registry of `VoterHandle` objects keyed by Telegram user ID
-   - Voter bots use `manager.app.send_message(...)` directly for vote notifications
-   - Wires in `ScheduleEditor` on construction: `self._schedule_editor = ScheduleEditor(repo, self._handles)`
-   - Wires in `RemindersEditor` and `ReminderScheduler` on construction
-   - `start_scheduler()` / `stop_scheduler()` — thin wrappers over `ReminderScheduler.start()` / `.stop()`
-
-6. **VoterHandle** (`src/voter_handle.py`):
-   - Two-field dataclass: `user: UserRecord`, `client: pyrogram.Client`
-   - Extracted to its own module to break the circular import between manager and voter
-   - The `user` field is the **same `UserRecord` instance** shared by reference with the voter bot
-   - This means `/enable`/`/disable` and schedule mutations via ScheduleEditor are immediately visible in the voter
-
-7. **ScheduleEditor** (`src/schedule_editor.py`):
-   - Owns the entire `/schedule` inline-keyboard UI: command handler + all `sch:*` callback routes
-   - Constructor: `(repo: UserRepository, handles: Dict[int, VoterHandle])`; the dict is passed by reference so newly-registered voters are visible immediately
-   - `register_handlers(app)` registers one `MessageHandler` (for `/schedule`) and one `CallbackQueryHandler` (for `^sch:` callbacks)
-   - Add flow: `/schedule` → `[Add]` → type picker (Game / Training) → day picker (only days not already scheduled for
-     the chosen type — enforces `(type, day)` uniqueness; shows "All days are already scheduled for {Type}." + Back when
-     nothing is left) → entry appended, DSL saved, main screen redrawn
-   - Remove flow: `[Remove]` → numbered list of current entries → tap any → entry removed, list redrawn (stays on remove screen)
-   - `Close` dismisses the keyboard; `Back` always returns one level up
-   - Persists via `repo.set_event_schedule(telegram_user_id, new_dsl)` and immediately mutates `handle.user.event_schedule`; mutation propagates to voter via the shared `UserRecord` reference
-   - Callback data scheme (stateless, ≤64 bytes): `sch:main`, `sch:close`, `sch:add`, `sch:add:t:<Type>`, `sch:add:d:<Type>:<day>`, `sch:rm`, `sch:rm:<index>`
-
-8. **RemindersEditor** (`src/reminders_editor.py`):
-   - Owns the entire `/reminders` inline-keyboard UI: command handler + all `rem:*` callback routes + free-text lead-time reply handler
-   - Constructor: `(repo: UserRepository, handles: Dict[int, VoterHandle])`; same shape as `ScheduleEditor`
-   - `register_handlers(app)` registers one `MessageHandler` (for `/reminders`), one `CallbackQueryHandler` (for `^rem:` callbacks), and one `MessageHandler` for the free-text lead-time reply (`filters.private & filters.reply & filters.text`)
-   - Main screen: text `Reminders: ON|OFF\nLead time: {hours} hours`; buttons `[Disable]/[Enable]` + `[Lead time]` + `[Close]`
-   - `rem:toggle` — flips `reminders_enabled`, persists via `repo.set_reminders_enabled`, mutates `handle.user.reminders_enabled`, re-renders
-   - `rem:lead` — sends a ForceReply prompt, stashes `self._pending_lead_input[from_user.id] = prompt_message_id`; reply handler validates positive integer, calls `repo.set_reminder_lead_hours`, mutates `handle.user.reminder_lead_hours`, clears pending, re-renders main screen
-   - DM-only + registered-user gating identical to `ScheduleEditor`
-   - Callback data scheme (stateless, ≤64 bytes): `rem:main`, `rem:close`, `rem:toggle`, `rem:lead`
-
-9. **ReminderDiscovery** (`src/reminder_discovery.py`):
-   - Module-level helpers: `prague_datetime_to_utc(event_date, event_time) -> datetime` (Prague/CET/CEST → UTC, DST-aware via `zoneinfo`); `chosen_option_is_go(poll, vote_option_text) -> bool` (pure substring match, NO fallback to index 0 — distinct from `AutoPollVoterBot.choose_option`)
-   - Class `ReminderDiscovery(user: UserRecord, event_info_parser: EventInfoParser, reminders: ReminderRepository)` — one instance per voter, constructed in `app.py`
-   - `async record_from_vote(topic_name, chat_id, topic_id, poll_message_id)` — called by the voter after a successful vote; skips silently (with warning log) if `telegram_user_id is None` or topic_name is unparseable; no `reminders_enabled` or lead-time check at insert (both handled by the poller)
-
-10. **ReminderRepository** (`src/reminder_repository.py`):
-    - `DueReminder` dataclass: `id, telegram_user_id, chat_id, topic_id, poll_message_id, topic_name, event_datetime, reminder_lead_hours`
-    - `ReminderRepository(db_path: str)`: `upsert(...)` (INSERT … ON CONFLICT DO UPDATE WHERE reminded_at IS NULL — frozen already-sent rows), `fetch_due() -> list[DueReminder]` (SQL gates on `reminded_at IS NULL`, `reminders_enabled = 1`, `event_datetime > now`; lead-hours returned for Python-side filter), `mark_reminded(id) -> int`, `delete_old(retention_days=7) -> int`
-
-11. **ReminderScheduler** (`src/reminder_scheduler.py`):
-    - Class `ReminderScheduler(common: CommonConfig, repo: ReminderRepository, handles: Dict[int, VoterHandle], manager_app: pyrogram.Client)`
-    - Constants: `POLL_INTERVAL_SECONDS = 300`, `RETENTION_DAYS = 7`
-    - `start()` — spawns a single `asyncio.Task` for the poller loop
-    - `stop()` — sets `_stopping`, cancels and awaits the task; second call is a no-op
-    - `_tick()`: outer `try/finally` ensures `repo.delete_old(RETENTION_DAYS)` runs even if the row loop raises; for each due row (after Python-side lead-time filter): look up `VoterHandle` (skip if missing), revocation check via `handle.client.get_messages` + `chosen_option_is_go`, send via `manager_app.send_message` + mark reminded; send failures leave `reminded_at` NULL for natural retry
-
-12. **Database** (`src/database.py`):
-    - `apply_migrations(db_path)`: applies pending yoyo migrations at startup
-    - Migration `0003_add_reminders`: adds `reminders_enabled` and `reminder_lead_hours` to `users`, creates `reminders` table with UNIQUE `(telegram_user_id, chat_id, topic_id)` and index on `(reminded_at, event_datetime)`
-
-13. **User Repository** (`src/user_repository.py`):
-    - `UserRecord` holds **mutable runtime state**: `enabled`, `event_schedule`, `reminders_enabled`, and `reminder_lead_hours` are mutated in-place by manager commands — no locks needed (single event loop), and the voter/poller pick up changes on the next poll
-    - `UserRepository(db_path)`: `get_enabled_users()`, `set_telegram_user_id(user_id, telegram_user_id)`, `set_enabled(telegram_user_id, enabled) -> int`, `set_event_schedule(telegram_user_id, dsl) -> int`, `set_reminders_enabled(telegram_user_id, enabled) -> int`, `set_reminder_lead_hours(telegram_user_id, hours) -> int`
+- **Shared `UserRecord`.** The voter, manager registry, and editors all hold the *same instance*. `/enable`, `/disable`, schedule/reminder edits mutate it in place — picked up on the next poll, no restart. Don't copy or re-fetch.
+- **Stateless schedule re-parse.** `topic_name_matches()` re-parses `self.user.event_schedule` on every incoming poll. There is no startup cache; that's deliberate.
+- **Reminder discovery writes unconditionally.** `record_from_vote` does *not* check `reminders_enabled` or lead hours. Those are the poller's job — so the user can flip reminders back on later and pending rows still fire.
+- **`chosen_option_is_go` is strict.** No fallback to option 0 (unlike `AutoPollVoterBot.choose_option`). Revocation check must not falsely pass.
+- **`upsert` freezes sent rows** via `WHERE reminded_at IS NULL` — re-voting won't re-fire an already-sent reminder.
+- **`_tick` uses `try/finally`** so `delete_old()` runs even if the row loop raises. Don't move it.
+- **Poller ticks once before the first sleep** so overdue reminders go out immediately at startup.
+- **Pyrogram clients must be constructed inside `main()`**, not at module scope. `Client.__init__` binds to `asyncio.get_event_loop()` at construction; `asyncio.run()` creates a *different* loop and you'll hit `got Future ... attached to a different loop` on the first await. Already bit us once.
+- **`VoterHandle` in its own module** to break the manager↔voter circular import. Don't inline it back.
 
 ### Startup Sequence (`app.py`)
 
@@ -148,8 +104,7 @@ Module scope (synchronous, pre-loop — only non-async setup):
 4. Start `HealthCheckServer` (Flask on its own thread; loop-independent)
 5. `asyncio.run(main(common, repo, health_server))`
 
-Inside `main()` (all Pyrogram construction and async work happens here, so asyncio objects bind to the running loop —
-see note below):
+Inside `main()` (all Pyrogram construction and async work happens here — see the Pyrogram-loop invariant above):
 
 1. Construct `ReminderRepository(common.database.path)`
 2. Construct `AutoPollManagerBot(common, repo, reminder_repo)` (requires `BOT_TOKEN`; wires `RemindersEditor` + `ReminderScheduler` internally)
@@ -166,12 +121,6 @@ see note below):
 11. Block on `await asyncio.Event().wait()` until cancelled (SIGINT/KeyboardInterrupt)
 12. `finally`: `await manager_bot.stop_scheduler()` first, then stop manager client, then each started voter in reverse order
 
-**Why Pyrogram clients must be constructed inside `main()`**: `pyrogram.Client.__init__` binds internal asyncio
-primitives to whatever loop `asyncio.get_event_loop()` resolves at construction time. Constructing clients at module
-scope (before `asyncio.run()`) binds them to an implicit default loop; `asyncio.run()` then creates a **different**
-loop, causing `got Future ... attached to a different loop` at the first `await`. Do not "simplify" this by lifting
-construction back above `asyncio.run()`.
-
 ### Voting Logic Flow
 
 1. Enabled guard: return immediately if `self.user.enabled` is False (checked before any work)
@@ -182,11 +131,7 @@ construction back above `asyncio.run()`.
 
 ### Configuration Rendering
 
-The `yaml_renderer.py` module uses Jinja2 with a custom filter:
-- `parse_schedule_dsl`: Converts DSL string to YAML-compatible structure; exposed as a Jinja2 filter for legacy template compatibility; also called on every poll arrival in the voter (stateless re-parse replaces the old startup cache) and on every schedule save in `ScheduleEditor`
-- `serialize_schedule_dsl` (in `src/schedule_dsl.py`): inverse of the parser; called by `ScheduleEditor._save` to write the updated DSL back to DB
-- Templates have access to `env` object containing all environment variables
-- StrictUndefined mode ensures missing variables raise errors
+`yaml_renderer.py` renders `config.yaml.j2` with Jinja2 in StrictUndefined mode (missing env vars raise). Templates access env via the `env` object. `parse_schedule_dsl` is registered as a Jinja2 filter for legacy template compatibility.
 
 ## File Structure
 
@@ -200,8 +145,8 @@ config.yaml.j2          # Jinja2 config template
 
 ## Important Notes
 
-- **Python environment**: use .venv to run python and its packages
-- **Session strings**: Generated separately with `python generate_session.py` and stored in the DB
+- **Python 3.11+** required; use `.venv` to run python and its packages (`tests/conftest.py` has a Py 3.14 event-loop shim)
+- **Session strings**: stored in the DB (`users.session_string`)
 - **Forum-specific**: Bot only responds to messages in forum topics (not regular chats)
 - **Unused-but-required parameters**: prefix with `_` (e.g., `_client`) when a parameter is mandated by a framework
   contract (such as Pyrogram handler callbacks, which are invoked as `callback(client, update)`) but the body doesn't

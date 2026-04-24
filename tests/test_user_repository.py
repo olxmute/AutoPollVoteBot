@@ -248,25 +248,14 @@ class TestSetReminderLeadHours:
         conn.close()
         assert row[0] == 36
 
+    def test_persists_arbitrary_integer_hours(self, tmp_db):
+        _insert_user(tmp_db, telegram_user_id=42)
+        repo = UserRepository(tmp_db)
+        rows = repo.set_reminder_lead_hours(42, 1)
+        assert rows == 1
+
     def test_raises_value_error_for_none_telegram_user_id(self, tmp_db):
         repo = UserRepository(tmp_db)
         with pytest.raises(ValueError, match="telegram_user_id must not be None"):
             repo.set_reminder_lead_hours(None, 10)
 
-    def test_raises_value_error_for_hours_less_than_one(self, tmp_db):
-        _insert_user(tmp_db, telegram_user_id=42)
-        repo = UserRepository(tmp_db)
-        with pytest.raises(ValueError, match="hours must be >= 1"):
-            repo.set_reminder_lead_hours(42, 0)
-
-    def test_raises_value_error_for_negative_hours(self, tmp_db):
-        _insert_user(tmp_db, telegram_user_id=42)
-        repo = UserRepository(tmp_db)
-        with pytest.raises(ValueError, match="hours must be >= 1"):
-            repo.set_reminder_lead_hours(42, -5)
-
-    def test_hours_one_is_valid(self, tmp_db):
-        _insert_user(tmp_db, telegram_user_id=42)
-        repo = UserRepository(tmp_db)
-        rows = repo.set_reminder_lead_hours(42, 1)
-        assert rows == 1
