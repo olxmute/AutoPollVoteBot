@@ -8,6 +8,8 @@ from src.config import load_config_from_template
 from src.database import apply_migrations
 from src.event_info_parser import EventInfoParser
 from src.health_check import HealthCheckServer
+from src.reminder_discovery import ReminderDiscovery
+from src.reminder_repository import ReminderRepository
 from src.user_repository import UserRepository
 
 # ---------- Logging ----------
@@ -41,8 +43,11 @@ async def main(common, repo, health_server):
 
     event_info_parser = EventInfoParser()
 
+    # Construct the reminder repository.
+    reminder_repo = ReminderRepository(common.database.path)
+
     # Construct the manager bot inside the running event loop.
-    manager_bot = AutoPollManagerBot(common, repo)
+    manager_bot = AutoPollManagerBot(common, repo, reminder_repo)
 
     # Load enabled users after migrations have already run.
     users = repo.get_enabled_users()
@@ -60,6 +65,11 @@ async def main(common, repo, health_server):
             user=user,
             event_info_parser=event_info_parser,
             manager=manager_bot,
+            reminder_discovery=ReminderDiscovery(
+                user=user,
+                event_info_parser=event_info_parser,
+                reminders=reminder_repo,
+            ),
         )
         for user in users
     ]
@@ -105,15 +115,22 @@ async def main(common, repo, health_server):
         await manager_bot.app.start()
         manager_started = True
 
-        # 4. Signal health server that everything is up.
+        # 4. Start reminder scheduler (after manager client is ready to send DMs).
+        await manager_bot.start_scheduler()
+
+        # 5. Signal health server that everything is up.
         health_server.set_status(True, "Bot running")
 
-        # 5. Block until cancelled.
+        # 6. Block until cancelled.
         await asyncio.Event().wait()
 
     finally:
-        # Graceful shutdown: manager first, then only the voters that were started.
+        # Graceful shutdown: scheduler first, then manager, then voters.
         if manager_started:
+            try:
+                await manager_bot.stop_scheduler()
+            except Exception as e:
+                log.warning("Error stopping reminder scheduler: %s", e)
             try:
                 await manager_bot.app.stop()
             except Exception as e:

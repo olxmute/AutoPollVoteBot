@@ -7,6 +7,9 @@ from pyrogram.handlers import MessageHandler
 from pyrogram.types import Message
 
 from src.config import CommonConfig
+from src.reminder_repository import ReminderRepository
+from src.reminders_editor import RemindersEditor
+from src.reminder_scheduler import ReminderScheduler
 from src.schedule_editor import ScheduleEditor
 from src.user_repository import UserRepository
 from src.voter_handle import VoterHandle  # re-exported for backward compatibility
@@ -31,6 +34,7 @@ class AutoPollManagerBot:
         self,
         common: CommonConfig,
         repo: UserRepository,
+        reminder_repo: ReminderRepository,
     ) -> None:
         self.repo = repo
         self.log = logging.getLogger("forum-poll-voter.manager")
@@ -54,6 +58,9 @@ class AutoPollManagerBot:
         )
         self._schedule_editor = ScheduleEditor(repo, self._handles)
         self._schedule_editor.register_handlers(self.app)
+        self._reminders_editor = RemindersEditor(repo, self._handles)
+        self._reminders_editor.register_handlers(self.app)
+        self._scheduler = ReminderScheduler(common, reminder_repo, self._handles, self.app)
 
     async def _handle_enable(self, _client: Client, message: Message) -> None:
         """Handle /enable command: resume autovoting for the sender."""
@@ -150,6 +157,14 @@ class AutoPollManagerBot:
             )
         self._handles[telegram_user_id] = handle
         self.log.info("Registered voter for telegram_user_id=%d.", telegram_user_id)
+
+    async def start_scheduler(self) -> None:
+        """Start the reminder poller task."""
+        await self._scheduler.start()
+
+    async def stop_scheduler(self) -> None:
+        """Stop the reminder poller task."""
+        await self._scheduler.stop()
 
     async def _get_handle_or_reject(self, message: Message) -> Optional[VoterHandle]:
         """Look up the sender in the registry.

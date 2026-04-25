@@ -41,6 +41,8 @@ def _make_user_record(
         vote_delay_seconds=5,
         telegram_user_id=tg_id,
         enabled=enabled,
+        reminders_enabled=True,
+        reminder_lead_hours=27,
     )
 
 
@@ -51,16 +53,23 @@ def _make_repo():
     return repo
 
 
-def _make_manager(common=None, repo=None) -> AutoPollManagerBot:
+def _make_reminder_repo():
+    """Return a MagicMock that quacks like ReminderRepository."""
+    return MagicMock()
+
+
+def _make_manager(common=None, repo=None, reminder_repo=None) -> AutoPollManagerBot:
     """Create AutoPollManagerBot with a patched Pyrogram Client."""
     if common is None:
         common = _make_common()
     if repo is None:
         repo = _make_repo()
+    if reminder_repo is None:
+        reminder_repo = _make_reminder_repo()
 
     with patch("src.auto_poll_manager_bot.Client") as mock_client_cls:
         mock_client_cls.return_value = MagicMock()
-        manager = AutoPollManagerBot(common, repo)
+        manager = AutoPollManagerBot(common, repo, reminder_repo)
     return manager
 
 
@@ -205,9 +214,10 @@ class TestClientConstruction:
     def test_client_constructed_with_expected_args(self):
         common = _make_common()
         repo = _make_repo()
+        reminder_repo = _make_reminder_repo()
         with patch("src.auto_poll_manager_bot.Client") as mock_client_cls:
             mock_client_cls.return_value = MagicMock()
-            AutoPollManagerBot(common, repo)
+            AutoPollManagerBot(common, repo, reminder_repo)
         mock_client_cls.assert_called_once_with(
             name="manager",
             api_id=common.pyrogram.api_id,
@@ -522,6 +532,7 @@ class TestScheduleEditorWiring:
         register_handlers is called with manager.app."""
         common = _make_common()
         repo = _make_repo()
+        reminder_repo = _make_reminder_repo()
 
         with patch("src.auto_poll_manager_bot.Client") as mock_client_cls, \
              patch("src.auto_poll_manager_bot.ScheduleEditor") as mock_editor_cls:
@@ -529,7 +540,7 @@ class TestScheduleEditorWiring:
             mock_editor_instance = MagicMock()
             mock_editor_cls.return_value = mock_editor_instance
 
-            manager = AutoPollManagerBot(common, repo)
+            manager = AutoPollManagerBot(common, repo, reminder_repo)
 
         # ScheduleEditor constructed with repo and the manager's _handles dict
         mock_editor_cls.assert_called_once_with(repo, manager._handles)
@@ -551,17 +562,19 @@ class TestScheduleEditorWiring:
 
         common = _make_common()
         repo = _make_repo()
+        reminder_repo = _make_reminder_repo()
 
         with patch("src.auto_poll_manager_bot.Client") as mock_client_cls:
             mock_app = MagicMock()
             mock_client_cls.return_value = mock_app
-            manager = AutoPollManagerBot(common, repo)
+            manager = AutoPollManagerBot(common, repo, reminder_repo)
 
         # Collect all add_handler positional-arg types
         call_args_list = mock_app.add_handler.call_args_list
-        # At least 5 handlers: enable, disable, status, schedule-cmd, sch-callback
-        assert len(call_args_list) >= 5, (
-            f"Expected at least 5 add_handler calls, got {len(call_args_list)}"
+        # At least 8 handlers: enable, disable, status, schedule-cmd, sch-callback,
+        # reminders-cmd, rem-callback, lead-time-reply
+        assert len(call_args_list) >= 8, (
+            f"Expected at least 8 add_handler calls, got {len(call_args_list)}"
         )
 
         handler_types = [type(call.args[0]).__name__ for call in call_args_list]
@@ -577,3 +590,88 @@ class TestScheduleEditorWiring:
         assert handler_types[4] == "CallbackQueryHandler", (
             f"5th handler should be CallbackQueryHandler (sch:*), got: {handler_types[4]}"
         )
+        # 6th must be MessageHandler for /reminders
+        assert handler_types[5] == "MessageHandler", (
+            f"6th handler should be MessageHandler (/reminders), got: {handler_types[5]}"
+        )
+        # 7th must be CallbackQueryHandler for rem:* callbacks
+        assert handler_types[6] == "CallbackQueryHandler", (
+            f"7th handler should be CallbackQueryHandler (rem:*), got: {handler_types[6]}"
+        )
+        # 8th must be MessageHandler for free-text lead-time reply
+        assert handler_types[7] == "MessageHandler", (
+            f"8th handler should be MessageHandler (lead-time reply), got: {handler_types[7]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: Task 7 — RemindersEditor wiring and scheduler lifecycle
+# ---------------------------------------------------------------------------
+
+class TestRemindersEditorWiring:
+    def test_manager_wires_reminders_editor(self):
+        """RemindersEditor is constructed with (repo, manager._handles) and
+        register_handlers is called with manager.app."""
+        common = _make_common()
+        repo = _make_repo()
+        reminder_repo = _make_reminder_repo()
+
+        with patch("src.auto_poll_manager_bot.Client") as mock_client_cls, \
+             patch("src.auto_poll_manager_bot.RemindersEditor") as mock_editor_cls:
+            mock_client_cls.return_value = MagicMock()
+            mock_editor_instance = MagicMock()
+            mock_editor_cls.return_value = mock_editor_instance
+
+            manager = AutoPollManagerBot(common, repo, reminder_repo)
+
+        # RemindersEditor constructed with repo and the manager's _handles dict
+        mock_editor_cls.assert_called_once_with(repo, manager._handles)
+        # register_handlers called with manager.app
+        mock_editor_instance.register_handlers.assert_called_once_with(manager.app)
+
+    def test_manager_reminders_editor_stored_as_attribute(self):
+        """AutoPollManagerBot exposes _reminders_editor attribute after init."""
+        manager = _make_manager()
+        assert hasattr(manager, "_reminders_editor")
+
+    def test_manager_scheduler_stored_as_attribute(self):
+        """AutoPollManagerBot exposes _scheduler attribute after init."""
+        manager = _make_manager()
+        assert hasattr(manager, "_scheduler")
+
+
+class TestSchedulerLifecycle:
+    def test_start_scheduler_delegates_to_scheduler_start(self):
+        """start_scheduler() calls self._scheduler.start()."""
+        manager = _make_manager()
+        manager._scheduler = MagicMock()
+        manager._scheduler.start = AsyncMock()
+        asyncio.run(manager.start_scheduler())
+        manager._scheduler.start.assert_awaited_once()
+
+    def test_stop_scheduler_delegates_to_scheduler_stop(self):
+        """stop_scheduler() calls self._scheduler.stop()."""
+        manager = _make_manager()
+        manager._scheduler = MagicMock()
+        manager._scheduler.stop = AsyncMock()
+        asyncio.run(manager.stop_scheduler())
+        manager._scheduler.stop.assert_awaited_once()
+
+    def test_scheduler_constructed_with_reminder_repo(self):
+        """ReminderScheduler is constructed with common, reminder_repo, handles, app."""
+        common = _make_common()
+        repo = _make_repo()
+        reminder_repo = _make_reminder_repo()
+
+        with patch("src.auto_poll_manager_bot.Client") as mock_client_cls, \
+             patch("src.auto_poll_manager_bot.ReminderScheduler") as mock_scheduler_cls:
+            mock_app = MagicMock()
+            mock_client_cls.return_value = mock_app
+            mock_scheduler_instance = MagicMock()
+            mock_scheduler_cls.return_value = mock_scheduler_instance
+
+            manager = AutoPollManagerBot(common, repo, reminder_repo)
+
+        # ReminderScheduler should be constructed with (common, reminder_repo, handles, app)
+        mock_scheduler_cls.assert_called_once_with(common, reminder_repo, manager._handles, mock_app)
+        assert manager._scheduler is mock_scheduler_instance

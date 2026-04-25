@@ -38,6 +38,8 @@ class TestGetEnabledUsers:
         assert u.vote_delay_seconds == 5
         assert u.telegram_user_id is None
         assert u.enabled is True
+        assert u.reminders_enabled is True
+        assert u.reminder_lead_hours == 27
 
     def test_excludes_disabled_user(self, tmp_db):
         _insert_user(tmp_db, session_name="active", enabled=1)
@@ -178,3 +180,82 @@ class TestSetEnabled:
         repo = UserRepository(tmp_db)
         with pytest.raises(ValueError, match="telegram_user_id must not be None"):
             repo.set_enabled(None, True)
+
+
+class TestSetRemindersEnabled:
+    def test_returns_one_for_known_user(self, tmp_db):
+        _insert_user(tmp_db, telegram_user_id=42)
+        repo = UserRepository(tmp_db)
+        rows = repo.set_reminders_enabled(42, False)
+        assert rows == 1
+
+    def test_returns_zero_for_unknown_telegram_user_id(self, tmp_db):
+        _insert_user(tmp_db, telegram_user_id=42)
+        repo = UserRepository(tmp_db)
+        rows = repo.set_reminders_enabled(9999, False)
+        assert rows == 0
+
+    def test_disable_reminders_persists(self, tmp_db):
+        _insert_user(tmp_db, telegram_user_id=42)
+        repo = UserRepository(tmp_db)
+        repo.set_reminders_enabled(42, False)
+        conn = sqlite3.connect(tmp_db)
+        row = conn.execute(
+            "SELECT reminders_enabled FROM users WHERE telegram_user_id = 42"
+        ).fetchone()
+        conn.close()
+        assert row[0] == 0
+
+    def test_enable_reminders_persists(self, tmp_db):
+        _insert_user(tmp_db, telegram_user_id=42)
+        repo = UserRepository(tmp_db)
+        repo.set_reminders_enabled(42, False)
+        repo.set_reminders_enabled(42, True)
+        conn = sqlite3.connect(tmp_db)
+        row = conn.execute(
+            "SELECT reminders_enabled FROM users WHERE telegram_user_id = 42"
+        ).fetchone()
+        conn.close()
+        assert row[0] == 1
+
+    def test_set_reminders_enabled_none_raises_value_error(self, tmp_db):
+        repo = UserRepository(tmp_db)
+        with pytest.raises(ValueError, match="telegram_user_id must not be None"):
+            repo.set_reminders_enabled(None, True)
+
+
+class TestSetReminderLeadHours:
+    def test_returns_one_for_known_user(self, tmp_db):
+        _insert_user(tmp_db, telegram_user_id=42)
+        repo = UserRepository(tmp_db)
+        rows = repo.set_reminder_lead_hours(42, 48)
+        assert rows == 1
+
+    def test_returns_zero_for_unknown_telegram_user_id(self, tmp_db):
+        _insert_user(tmp_db, telegram_user_id=42)
+        repo = UserRepository(tmp_db)
+        rows = repo.set_reminder_lead_hours(9999, 48)
+        assert rows == 0
+
+    def test_persists_updated_hours(self, tmp_db):
+        _insert_user(tmp_db, telegram_user_id=42)
+        repo = UserRepository(tmp_db)
+        repo.set_reminder_lead_hours(42, 36)
+        conn = sqlite3.connect(tmp_db)
+        row = conn.execute(
+            "SELECT reminder_lead_hours FROM users WHERE telegram_user_id = 42"
+        ).fetchone()
+        conn.close()
+        assert row[0] == 36
+
+    def test_persists_arbitrary_integer_hours(self, tmp_db):
+        _insert_user(tmp_db, telegram_user_id=42)
+        repo = UserRepository(tmp_db)
+        rows = repo.set_reminder_lead_hours(42, 1)
+        assert rows == 1
+
+    def test_raises_value_error_for_none_telegram_user_id(self, tmp_db):
+        repo = UserRepository(tmp_db)
+        with pytest.raises(ValueError, match="telegram_user_id must not be None"):
+            repo.set_reminder_lead_hours(None, 10)
+
