@@ -1,8 +1,9 @@
 """Helpers and discovery class for recording reminders on autovote success.
 
 Module-level helpers `prague_datetime_to_utc` and `chosen_option_is_go` are
-shared with the poller (ReminderScheduler); they live here because this module
-is imported by both the voter bot and the scheduler.
+shared with the poller (ReminderScheduler) and `prague_datetime_to_utc` is
+also imported by `google_calendar_url`; they live here because this module is
+imported by the voter bot, the scheduler, and the calendar URL builder.
 """
 import logging
 from datetime import datetime, time as dtime, date as ddate

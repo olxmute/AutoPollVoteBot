@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, List, Optional
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 from pyrogram.handlers import MessageHandler
-from pyrogram.types import Message, PollOption
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, PollOption
 
 if TYPE_CHECKING:
     from pyrogram.types import ForumTopic
@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from src.reminder_discovery import ReminderDiscovery
 
 from src.config import CommonConfig, ScheduledEvent
+from src.event_info_parser import EventInfo
+from src.google_calendar_url import build_add_event_url
 from src.schedule_dsl import parse_schedule_dsl
 from src.user_repository import UserRecord
 
@@ -58,12 +60,21 @@ class AutoPollVoterBot:
         # True if the message belongs to a topic (forum thread)
         return bool(getattr(message, "is_topic_message", False))
 
-    def topic_name_matches(self, name: str) -> bool:
+    def parse_topic(self, name: str) -> Optional[EventInfo]:
         """
-        Accept topic names that:
-          - parse into a valid EventInfo,
-          - have event_date in the future (strictly greater than today).
-          - match at least one scheduled event (type, day).
+        Parse a forum topic name into an EventInfo. Returns None and logs a
+        warning on parse failure.
+        """
+        try:
+            return self.event_info_parser.parse_line(name)
+        except Exception as exc:
+            self.log.warning("Topic name didn't parse as event info: %r -> %s", name, exc)
+            return None
+
+    def matches_schedule(self, event_info: EventInfo) -> bool:
+        """
+        True iff the event is in the future AND its (type, day) matches one of
+        the user's scheduled entries.
 
         Re-parses self.user.event_schedule on every call so that schedule edits
         made via ScheduleEditor are immediately visible without a restart.
@@ -74,28 +85,20 @@ class AutoPollVoterBot:
             self.log.exception("Could not parse event_schedule: %r -> %s", self.user.event_schedule, exc)
             return False
 
-        try:
-            event_info = self.event_info_parser.parse_line(name)
-        except Exception as exc:
-            self.log.warning("Topic name didn't parse as event info: %r -> %s", name, exc)
-            return False
-
-        # Check date is in the future
         if event_info.event_date <= date.today():
-            self.log.info("Topic '%s' is in past; skipping.", name)
+            self.log.info("Event %s is in past; skipping.", event_info.event_date)
             return False
 
-        # Check if event matches any scheduled event
         event_type = event_info.event_type.lower()
         weekday = event_info.weekday.lower()
 
         for scheduled in events:
             if scheduled.type.lower() == event_type and scheduled.day.lower() == weekday:
-                self.log.info("Topic '%s' matches schedule (type=%s, day=%s).",
-                         name, scheduled.type, scheduled.day)
+                self.log.info("Event matches schedule (type=%s, day=%s).", scheduled.type, scheduled.day)
                 return True
 
-        self.log.info("Topic '%s' doesn't match any scheduled event; skipping.", name)
+        self.log.info("Event (type=%s, day=%s) doesn't match any scheduled entry; skipping.",
+                      event_info.event_type, event_info.weekday)
         return False
 
     def choose_option(self, options: List[PollOption]) -> Optional[int]:
@@ -132,7 +135,10 @@ class AutoPollVoterBot:
             self.log.info("Skipping; unknown topic name (thread %s).", message.message_thread_id)
             return
 
-        if not self.topic_name_matches(topic_name):
+        event_info = self.parse_topic(topic_name)
+        if event_info is None:
+            return
+        if not self.matches_schedule(event_info):
             return
 
         self.log.info("Topic matched: '%s' (thread %s).", topic_name, message.message_thread_id)
@@ -177,7 +183,7 @@ class AutoPollVoterBot:
                 self.log.error("Failed to record reminder after vote on poll %s: %s", message.id, e)
 
         # Send notification after successful vote
-        await self.send_vote_notification(topic_name)
+        await self.send_vote_notification(topic_name, event_info)
 
     async def on_forum_message(self, client, message: Message):
         """
@@ -191,12 +197,16 @@ class AutoPollVoterBot:
         except Exception as e:
             self.log.exception("Handler crashed: %s", e)
 
-    async def send_vote_notification(self, topic_name: str) -> None:
+    async def send_vote_notification(self, topic_name: str, event_info: EventInfo) -> None:
         """
         Send a notification message about the vote via the manager bot.
 
+        The message includes an inline ``URL`` button that opens Google
+        Calendar's new-event sheet prefilled with the event title and times.
+
         Args:
             topic_name: The name of the forum topic where the vote occurred
+            event_info: Parsed event details used to build the calendar URL
         """
         if self.user.telegram_user_id is None:
             self.log.warning(
@@ -205,9 +215,15 @@ class AutoPollVoterBot:
             return
 
         text = f"<b>Vote Notification</b>\n\nEvent: {topic_name}"
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📅 Add to Google Calendar", url=build_add_event_url(event_info))]]
+        )
         try:
             await self.manager.app.send_message(
-                chat_id=self.user.telegram_user_id, text=text, parse_mode=ParseMode.HTML,
+                chat_id=self.user.telegram_user_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
             )
         except Exception as e:
             self.log.error("Failed to send vote notification: %s", e)

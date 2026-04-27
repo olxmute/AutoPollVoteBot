@@ -69,6 +69,8 @@ One file per role in `src/`; read the file for API detail. Non-obvious invariant
 | Module | Role |
 |---|---|
 | `auto_poll_voter_bot.py` | One client per enabled user; listens for forum polls, votes, records reminder. |
+| `google_calendar_url.py` | Pure URL builder for the "Add to Google Calendar" inline button on vote notifications. |
+| `event_info_parser.py` | Parses topic names like `"Game 2025-09-30, Tue, 20:00-22:00"`. |
 | `auto_poll_manager_bot.py` | Manager bot: `/enable`, `/disable`, `/status`; hosts the editors and scheduler. Registry of `VoterHandle`. |
 | `voter_handle.py` | `{user: UserRecord, client: Client}` dataclass. Extracted to break the manager↔voter circular import. |
 | `schedule_editor.py` | Owns `/schedule` UI (inline keyboard, `sch:*` callbacks). |
@@ -77,7 +79,6 @@ One file per role in `src/`; read the file for API detail. Non-obvious invariant
 | `reminder_repository.py` | SQLite store for `reminders` rows. `upsert`, `fetch_due`, `mark_reminded`, `delete_old`. |
 | `reminder_scheduler.py` | Background poller (5-min tick) that sends due reminders and prunes old rows. |
 | `user_repository.py` | SQLite store for `users`. `UserRecord` is shared live with the voter. |
-| `event_info_parser.py` | Parses topic names like `"Game 2025-09-30, Tue, 20:00-22:00"`. |
 | `schedule_dsl.py` | Parses/serializes `"Game wed; Training tue"`. Strict 2-token entries — 1- or 3-token lines raise `ValueError`. |
 | `config.py` / `yaml_renderer.py` | Loads `config.yaml.j2` → `CommonConfig`. |
 | `health_check.py` | Flask `/health` on its own thread; `register_client(client)` per bot. |
@@ -86,7 +87,7 @@ One file per role in `src/`; read the file for API detail. Non-obvious invariant
 ### Design Invariants (the stuff that will bite you)
 
 - **Shared `UserRecord`.** The voter, manager registry, and editors all hold the *same instance*. `/enable`, `/disable`, schedule/reminder edits mutate it in place — picked up on the next poll, no restart. Don't copy or re-fetch.
-- **Stateless schedule re-parse.** `topic_name_matches()` re-parses `self.user.event_schedule` on every incoming poll. There is no startup cache; that's deliberate.
+- **Stateless schedule re-parse.** `matches_schedule()` re-parses `self.user.event_schedule` on every incoming poll. There is no startup cache; that's deliberate.
 - **Reminder discovery writes unconditionally.** `record_from_vote` does *not* check `reminders_enabled` or lead hours. Those are the poller's job — so the user can flip reminders back on later and pending rows still fire.
 - **`chosen_option_is_go` is strict.** No fallback to option 0 (unlike `AutoPollVoterBot.choose_option`). Revocation check must not falsely pass.
 - **`upsert` freezes sent rows** via `WHERE reminded_at IS NULL` — re-voting won't re-fire an already-sent reminder.
@@ -127,7 +128,7 @@ Inside `main()` (all Pyrogram construction and async work happens here — see t
 2. Pyrogram filters (chat + forum topic + poll) → fetch topic name → parse into `EventInfo`
 3. Validate: event date strictly in the future AND matches schedule (type, day)
 4. Skip if poll already has `chosen_option_id`; otherwise pick option matching `vote_option`
-5. `await asyncio.sleep(vote_delay_seconds)` → `vote_poll(...)` → `await self.reminder_discovery.record_from_vote(...)` inserts/upserts a row in the `reminders` table → notify user via `self.manager.app.send_message(...)` with `ParseMode.HTML`
+5. `await asyncio.sleep(vote_delay_seconds)` → `vote_poll(...)` → `await self.reminder_discovery.record_from_vote(...)` inserts/upserts a row in the `reminders` table → notify user via `self.manager.app.send_message(...)` with `ParseMode.HTML`. The notification carries an inline `URL` button to add the event to Google Calendar (built by `google_calendar_url.build_add_event_url`).
 
 ### Configuration Rendering
 
