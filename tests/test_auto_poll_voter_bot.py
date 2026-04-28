@@ -1,4 +1,4 @@
-"""Tests for AutoPollVoterBot (Task 6, Task 3, and Task 4).
+"""Tests for AutoPollVoterBot.
 
 Covers:
   - enabled guard: on_forum_message returns early when user.enabled is False
@@ -7,12 +7,12 @@ Covers:
   - send_vote_notification: logs and does NOT re-raise when manager.send_message raises
   - send_vote_notification: logs warning and does NOT call manager.send_message when
     telegram_user_id is None
-  - topic_name_matches: stateless re-parse of event_schedule on every call (Task 3)
-  - topic_name_matches: empty schedule returns False (Task 3)
-  - topic_name_matches: unparseable DSL logs and returns False (Task 3)
-  - reminder_discovery: record_from_vote called on successful vote (Task 4)
-  - reminder_discovery: None is backward-compatible (Task 4)
-  - reminder_discovery: NOT called when vote_poll raises (Task 4)
+  - parse_topic: returns EventInfo on valid topic, None (with warning) on parse failure
+  - matches_schedule: stateless re-parse of event_schedule on every call
+  - matches_schedule: empty schedule, unparseable DSL, past event, no-match all return False
+  - reminder_discovery: record_from_vote called on successful vote
+  - reminder_discovery: None is backward-compatible
+  - reminder_discovery: NOT called when vote_poll raises
 """
 import asyncio
 import logging
@@ -21,6 +21,7 @@ from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from pyrogram.enums import ParseMode
+from pyrogram.types import InlineKeyboardMarkup
 
 from src.auto_poll_voter_bot import AutoPollVoterBot
 from src.config import CommonConfig, DatabaseConfig, GroupConfig, ManagerBotConfig, PyrogramConfig, ServerConfig
@@ -160,23 +161,59 @@ class TestOnForumMessageGuard:
 
 
 # ---------------------------------------------------------------------------
+# Helper: minimal EventInfo for send_vote_notification tests
+# ---------------------------------------------------------------------------
+
+def _make_event_info(
+    event_type: str = "Game",
+    event_date: date = date(2099, 1, 7),  # a Wednesday — matches default weekday="Wed"
+    weekday: str = "Wed",
+    start_time: time = time(20, 0),
+    end_time: time = time(22, 0),
+) -> EventInfo:
+    return EventInfo(
+        event_type=event_type,
+        event_date=event_date,
+        weekday=weekday,
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tests: send_vote_notification
 # ---------------------------------------------------------------------------
 
 class TestSendVoteNotification:
     def test_sends_message_with_correct_args(self):
-        """send_vote_notification calls manager.app.send_message with correct chat_id, text, parse_mode."""
+        """send_vote_notification calls manager.app.send_message with correct chat_id, text, parse_mode, and inline keyboard."""
         user = _make_user(enabled=True, telegram_user_id=111)
         manager = _make_manager()
         voter = _make_voter(user=user, manager=manager)
 
-        asyncio.run(voter.send_vote_notification("Game 2026-05-01, Fri, 20:00-22:00"))
-
-        manager.app.send_message.assert_awaited_once_with(
-            chat_id=111,
-            text="<b>Vote Notification</b>\n\nEvent: Game 2026-05-01, Fri, 20:00-22:00",
-            parse_mode=ParseMode.HTML,
+        event_info = _make_event_info(
+            event_type="Game",
+            event_date=date(2026, 5, 1),
+            weekday="Fri",
+            start_time=time(20, 0),
+            end_time=time(22, 0),
         )
+        asyncio.run(voter.send_vote_notification("Game 2026-05-01, Fri, 20:00-22:00", event_info))
+
+        manager.app.send_message.assert_awaited_once()
+        kwargs = manager.app.send_message.call_args.kwargs
+        assert kwargs["chat_id"] == 111
+        assert kwargs["text"] == "<b>Vote Notification</b>\n\nEvent: Game 2026-05-01, Fri, 20:00-22:00"
+        assert kwargs["parse_mode"] == ParseMode.HTML
+
+        keyboard = kwargs["reply_markup"]
+        assert isinstance(keyboard, InlineKeyboardMarkup)
+        assert len(keyboard.inline_keyboard) == 1
+        row = keyboard.inline_keyboard[0]
+        assert len(row) == 1
+        button = row[0]
+        assert button.text == "📅 Add to Google Calendar"
+        assert button.url.startswith("https://calendar.google.com/calendar/render?action=TEMPLATE&")
 
     def test_send_message_raises_is_logged_not_reraised(self):
         """When manager.app.send_message raises, send_vote_notification logs and does NOT re-raise."""
@@ -186,7 +223,7 @@ class TestSendVoteNotification:
         voter = _make_voter(user=user, manager=manager)
 
         # Should not raise
-        asyncio.run(voter.send_vote_notification("Game 2026-05-01, Fri, 20:00-22:00"))
+        asyncio.run(voter.send_vote_notification("Game 2026-05-01, Fri, 20:00-22:00", _make_event_info()))
         manager.app.send_message.assert_awaited_once()
 
     def test_no_telegram_user_id_skips_send(self):
@@ -195,7 +232,7 @@ class TestSendVoteNotification:
         manager = _make_manager()
         voter = _make_voter(user=user, manager=manager)
 
-        asyncio.run(voter.send_vote_notification("Game 2026-05-01, Fri, 20:00-22:00"))
+        asyncio.run(voter.send_vote_notification("Game 2026-05-01, Fri, 20:00-22:00", _make_event_info()))
 
         manager.app.send_message.assert_not_awaited()
 
@@ -206,7 +243,7 @@ class TestSendVoteNotification:
         voter = _make_voter(user=user)
 
         with caplog.at_level(logging.WARNING, logger=f"forum-poll-voter.{user.session_name}"):
-            asyncio.run(voter.send_vote_notification("some topic"))
+            asyncio.run(voter.send_vote_notification("some topic", _make_event_info()))
 
         assert any("telegram_user_id not set" in r.message for r in caplog.records)
 
@@ -219,9 +256,34 @@ class TestSendVoteNotification:
         voter = _make_voter(user=user, manager=manager)
 
         with caplog.at_level(logging.ERROR, logger=f"forum-poll-voter.{user.session_name}"):
-            asyncio.run(voter.send_vote_notification("some topic"))
+            asyncio.run(voter.send_vote_notification("some topic", _make_event_info()))
 
         assert any("Failed to send vote notification" in r.message for r in caplog.records)
+
+    def test_button_url_uses_event_info_times(self):
+        """The button URL must encode the event_info date/times (not a hardcoded value).
+
+        Uses a distinct date from `test_sends_message_with_correct_args` (2026-11-04
+        is in CET, UTC+1) so accidental hardcoding of the May date in the URL
+        builder would surface here.
+        """
+        user = _make_user(enabled=True, telegram_user_id=111)
+        manager = _make_manager()
+        voter = _make_voter(user=user, manager=manager)
+
+        # 2026-11-04 is after Prague's CEST->CET switch (UTC+1): 20:00 Prague -> 19:00 UTC.
+        event_info = _make_event_info(
+            event_type="Game",
+            event_date=date(2026, 11, 4),
+            weekday="Wed",
+            start_time=time(20, 0),
+            end_time=time(22, 0),
+        )
+        asyncio.run(voter.send_vote_notification("Game 2026-11-04, Wed, 20:00-22:00", event_info))
+
+        kwargs = manager.app.send_message.call_args.kwargs
+        button = kwargs["reply_markup"].inline_keyboard[0][0]
+        assert "dates=20261104T190000Z/20261104T210000Z" in button.url
 
 
 # ---------------------------------------------------------------------------
@@ -265,31 +327,39 @@ class TestRemovedBehavior:
 
 
 # ---------------------------------------------------------------------------
-# Helpers for topic_name_matches tests
+# Tests: parse_topic
 # ---------------------------------------------------------------------------
 
-def _make_event_info(
-    event_type: str = "Game",
-    event_date: date = date(2099, 1, 1),
-    weekday: str = "Wed",
-    start_time: time = time(20, 0),
-    end_time: time = time(22, 0),
-) -> EventInfo:
-    return EventInfo(
-        event_type=event_type,
-        event_date=event_date,
-        weekday=weekday,
-        start_time=start_time,
-        end_time=end_time,
-    )
+class TestParseTopic:
+    """parse_topic translates a topic-name string into Optional[EventInfo]."""
+
+    def test_returns_event_info_on_valid_topic(self):
+        """parse_topic returns the EventInfo produced by event_info_parser on success."""
+        voter = _make_voter()
+        parsed = _make_event_info(event_type="Game", event_date=date(2099, 1, 7), weekday="Wed")
+        voter.event_info_parser.parse_line.return_value = parsed
+
+        assert voter.parse_topic("Game 2099-01-07, Wed, 20:00-22:00") is parsed
+
+    def test_unparseable_topic_returns_none(self, caplog):
+        """When event_info_parser.parse_line raises, parse_topic logs a warning and returns None."""
+        voter = _make_voter()
+        voter.event_info_parser.parse_line.side_effect = ValueError("malformed topic")
+
+        with caplog.at_level(logging.WARNING, logger="forum-poll-voter.alice"):
+            result = voter.parse_topic("not a real topic")
+
+        assert result is None
+        assert any("didn't parse as event info" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
-# Tests: topic_name_matches (stateless re-parse — Task 3)
+# Tests: matches_schedule (stateless re-parse of event_schedule)
 # ---------------------------------------------------------------------------
 
-class TestTopicNameMatchesStatelessReParse:
-    """Tests that topic_name_matches re-parses event_schedule on every call (Task 3)."""
+class TestMatchesSchedule:
+    """Tests that matches_schedule re-parses event_schedule on every call and applies
+    future-date + (type, day) checks."""
 
     def _make_voter_with_schedule(self, event_schedule: str) -> AutoPollVoterBot:
         user = UserRecord(
@@ -305,47 +375,66 @@ class TestTopicNameMatchesStatelessReParse:
         )
         return _make_voter(user=user)
 
-    def test_live_reparse_after_schedule_mutation(self):
-        """After bot.user.event_schedule = 'Game wed', topic_name_matches returns True for matching topic."""
-        voter = self._make_voter_with_schedule("Training sat")
-
-        # Set up parser to return a matching event info
-        future_wed = date(2099, 1, 5)  # a Wednesday
-        voter.event_info_parser.parse_line.return_value = _make_event_info(
-            event_type="Game", event_date=future_wed, weekday="Wed", start_time=time(20, 0)
+    def test_matches_when_type_and_day_align(self):
+        """Returns True when type+day match a scheduled entry and the event is in the future."""
+        voter = self._make_voter_with_schedule("Game wed")
+        event_info = _make_event_info(
+            event_type="Game", event_date=date(2099, 1, 7), weekday="Wed"
         )
 
-        # Initially "Training sat" doesn't match "Game Wed" event
-        assert voter.topic_name_matches("Game 2099-01-05, Wed, 20:00-22:00") is False
+        assert voter.matches_schedule(event_info) is True
+
+    def test_live_reparse_after_schedule_mutation(self):
+        """After mutating bot.user.event_schedule, matches_schedule reflects the change on the next call."""
+        voter = self._make_voter_with_schedule("Training sat")
+        event_info = _make_event_info(
+            event_type="Game", event_date=date(2099, 1, 7), weekday="Wed"
+        )
+
+        # Initially "Training sat" doesn't match a Game/Wed event
+        assert voter.matches_schedule(event_info) is False
 
         # Mutate the schedule in-memory (simulates ScheduleEditor save)
         voter.user.event_schedule = "Game wed"
 
-        # Now the schedule matches
-        assert voter.topic_name_matches("Game 2099-01-05, Wed, 20:00-22:00") is True
+        assert voter.matches_schedule(event_info) is True
 
     def test_empty_schedule_returns_false(self):
-        """With empty event_schedule, topic_name_matches returns False for any topic."""
+        """With empty event_schedule, matches_schedule returns False for any event."""
         voter = self._make_voter_with_schedule("")
-
-        future_wed = date(2099, 1, 5)
-        voter.event_info_parser.parse_line.return_value = _make_event_info(
-            event_type="Game", event_date=future_wed, weekday="Wed", start_time=time(20, 0)
+        event_info = _make_event_info(
+            event_type="Game", event_date=date(2099, 1, 7), weekday="Wed"
         )
 
-        assert voter.topic_name_matches("Game 2099-01-05, Wed, 20:00-22:00") is False
+        assert voter.matches_schedule(event_info) is False
 
     def test_unparseable_dsl_logs_and_returns_false(self, caplog):
-        """Unparseable DSL (e.g., missing day) logs via log.exception and returns False without crashing."""
+        """Unparseable DSL (missing day) logs via log.exception and returns False without crashing."""
         # "Game" alone has no day — parse_schedule_dsl raises ValueError
         voter = self._make_voter_with_schedule("Game")
+        event_info = _make_event_info(
+            event_type="Game", event_date=date(2099, 1, 7), weekday="Wed"
+        )
 
         with caplog.at_level(logging.ERROR, logger="forum-poll-voter.alice"):
-            result = voter.topic_name_matches("Game 2099-01-05, Wed, 20:00-22:00")
+            result = voter.matches_schedule(event_info)
 
         assert result is False
         # log.exception records at ERROR level
         assert any("Could not parse event_schedule" in r.message for r in caplog.records)
+
+    def test_past_event_returns_false(self, caplog):
+        """When event_date is in the past, matches_schedule logs and returns False."""
+        voter = self._make_voter_with_schedule("Game wed")
+        event_info = _make_event_info(
+            event_type="Game", event_date=date(2000, 1, 5), weekday="Wed"  # past Wednesday
+        )
+
+        with caplog.at_level(logging.INFO, logger="forum-poll-voter.alice"):
+            result = voter.matches_schedule(event_info)
+
+        assert result is False
+        assert any("is in past" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +533,22 @@ class TestVoteInThreadPollReminderDiscovery:
             7,
         )
 
+    def test_send_vote_notification_called_with_parsed_event_info(self):
+        """vote_in_thread_poll must await send_vote_notification with the parsed EventInfo.
+
+        Pins the contract that the EventInfo returned by parse_topic is threaded
+        into send_vote_notification (which builds the calendar URL).
+        """
+        voter = self._setup_voter_with_matching_topic(reminder_discovery=None)
+        msg = _make_full_poll_message(chat_id=-100, thread_id=42, msg_id=7)
+
+        asyncio.run(voter.vote_in_thread_poll(msg))
+
+        voter.send_vote_notification.assert_awaited_once_with(
+            "Game 2099-01-05, Wed, 20:00-22:00",
+            voter.event_info_parser.parse_line.return_value,
+        )
+
     def test_reminder_discovery_none_vote_succeeds(self):
         """When reminder_discovery=None, voting still completes without error (backward-compat)."""
         voter = self._setup_voter_with_matching_topic(reminder_discovery=None)
@@ -466,3 +571,45 @@ class TestVoteInThreadPollReminderDiscovery:
         asyncio.run(voter.vote_in_thread_poll(msg))
 
         discovery.record_from_vote.assert_not_awaited()
+
+    def test_parse_failure_skips_vote_and_notification(self):
+        """When parse_topic returns None (topic name didn't parse), vote_in_thread_poll
+        skips vote_poll, record_from_vote, and send_vote_notification.
+        """
+        discovery = MagicMock()
+        discovery.record_from_vote = AsyncMock()
+
+        voter = self._setup_voter_with_matching_topic(reminder_discovery=discovery)
+        # Make parse_line raise so parse_topic returns None
+        voter.event_info_parser.parse_line.side_effect = ValueError("not a topic")
+        msg = _make_full_poll_message()
+
+        asyncio.run(voter.vote_in_thread_poll(msg))
+
+        voter.app.vote_poll.assert_not_awaited()
+        discovery.record_from_vote.assert_not_awaited()
+        voter.send_vote_notification.assert_not_awaited()
+
+    def test_schedule_mismatch_skips_vote_and_notification(self):
+        """When parse_topic succeeds but matches_schedule returns False, vote_in_thread_poll
+        skips vote_poll, record_from_vote, and send_vote_notification.
+        """
+        discovery = MagicMock()
+        discovery.record_from_vote = AsyncMock()
+
+        voter = self._setup_voter_with_matching_topic(reminder_discovery=discovery)
+        # Topic parses fine but its weekday ("Sat") doesn't match user.event_schedule ("Game wed")
+        voter.event_info_parser.parse_line.return_value = EventInfo(
+            event_type="Game",
+            event_date=date(2099, 1, 10),  # a Saturday
+            weekday="Sat",
+            start_time=time(20, 0),
+            end_time=time(22, 0),
+        )
+        msg = _make_full_poll_message()
+
+        asyncio.run(voter.vote_in_thread_poll(msg))
+
+        voter.app.vote_poll.assert_not_awaited()
+        discovery.record_from_vote.assert_not_awaited()
+        voter.send_vote_notification.assert_not_awaited()

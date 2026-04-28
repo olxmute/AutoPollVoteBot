@@ -12,6 +12,7 @@ multiple users concurrently via a SQLite-backed user database.
 - Multi-user support: run N Pyrogram clients concurrently
 - Manager bot for per-user configuration via Telegram DM commands
 - Per-event reminders: DMs each user before events they auto-voted for
+- Add to Google Calendar: vote-notification DMs include an inline button that prefills the GCal app
 - Health check endpoint reporting all client connection states
 - Docker support
 
@@ -284,7 +285,7 @@ docker run -d \
    - Verifies if the event matches the user's configured schedule
    - Automatically votes for the configured option (e.g., "Go!")
    - Skips voting if already voted
-   - Sends a notification message via the manager bot with event details
+   - Sends a notification message via the manager bot with event details and an inline 'Add to Google Calendar' button
    - On a successful vote, records a row in the `reminders` table for later delivery
 
 6. A background poller runs every **5 minutes** inside the manager bot:
